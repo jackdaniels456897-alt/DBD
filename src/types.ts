@@ -73,9 +73,17 @@ export interface Point {
 
 export type ConnectorStyle = 'orthogonal' | 'curved' | 'straight';
 
-/** Área agrupada que envolve tabelas visualmente relacionadas. */
+/**
+ * Área desenhada no canvas. A participação das tabelas é espacial: pertence ao
+ * grupo toda tabela cujo centro está dentro do retângulo.
+ */
 export interface TableGroup {
   id: string;
   name: string;
-  tableNames: string[];
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** índice na paleta de cores de grupo */
+  color: number;
 }

@@ -93,14 +93,23 @@ created_at datetime`}</pre>
           </section>
 
           <section>
-            <h3 className="mb-2 text-sm font-semibold text-sky-400">5. Grupos</h3>
+            <h3 className="mb-2 text-sm font-semibold text-sky-400">5. Grupos (áreas)</h3>
             <ul className="space-y-1.5 text-xs text-slate-300">
-              <li>Crie regiões nomeadas para organizar visualmente as tabelas.</li>
-              <li>Abra o menu “📁 Grupos” e clique em ”+ Novo grupo” (a tabela selecionada é incluída automaticamente).</li>
-              <li>Com um grupo selecionado, use <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">+</kbd> na barra de status para adicionar a tabela atual.</li>
-              <li>Arraste a borda ou o nome do grupo para mover todas as tabelas juntas.</li>
-              <li>Grupos são preservados em “Salvar Projeto” e restaurados ao importar.</li>
-              <li>Clique no “✕” no painel para excluir um grupo (as tabelas continua existindo, só fora do grupo).</li>
+              <li>
+                <strong className="text-slate-100">Criar:</strong> segure{' '}
+                <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">Ctrl</kbd>/
+                <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">⌘</kbd> e arraste numa
+                área vazia — como desenhar um retângulo.
+              </li>
+              <li>
+                <strong className="text-slate-100">Participação é espacial:</strong> arraste uma tabela para dentro da
+                área e ela entra no grupo; arraste para fora e ela sai. Sem menus.
+              </li>
+              <li>Arraste o título ou o interior da área para mover o grupo com todas as tabelas dentro.</li>
+              <li>Use os 8 quadradinhos nas bordas para redimensionar a área.</li>
+              <li>Duplo-clique no título renomeia. O ✕ apaga só a área (as tabelas ficam).</li>
+              <li>No painel “▦ Grupos”: ⤢ ajusta a área ao conteúdo e o círculo colorido troca a cor.</li>
+              <li>Grupos entram no “Salvar Projeto” e são restaurados ao importar.</li>
             </ul>
           </section>
 
