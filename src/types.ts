@@ -72,3 +72,10 @@ export interface Point {
 }
 
 export type ConnectorStyle = 'orthogonal' | 'curved' | 'straight';
+
+/** Área agrupada que envolve tabelas visualmente relacionadas. */
+export interface TableGroup {
+  id: string;
+  name: string;
+  tableNames: string[];
+}

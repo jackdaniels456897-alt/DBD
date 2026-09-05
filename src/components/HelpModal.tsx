@@ -93,7 +93,19 @@ created_at datetime`}</pre>
           </section>
 
           <section>
-            <h3 className="mb-2 text-sm font-semibold text-sky-400">5. Dicas gerais</h3>
+            <h3 className="mb-2 text-sm font-semibold text-sky-400">5. Grupos</h3>
+            <ul className="space-y-1.5 text-xs text-slate-300">
+              <li>Crie regiões nomeadas para organizar visualmente as tabelas.</li>
+              <li>Abra o menu “📁 Grupos” e clique em ”+ Novo grupo” (a tabela selecionada é incluída automaticamente).</li>
+              <li>Com um grupo selecionado, use <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">+</kbd> na barra de status para adicionar a tabela atual.</li>
+              <li>Arraste a borda ou o nome do grupo para mover todas as tabelas juntas.</li>
+              <li>Grupos são preservados em “Salvar Projeto” e restaurados ao importar.</li>
+              <li>Clique no “✕” no painel para excluir um grupo (as tabelas continua existindo, só fora do grupo).</li>
+            </ul>
+          </section>
+
+          <section>
+            <h3 className="mb-2 text-sm font-semibold text-sky-400">6. Dicas gerais</h3>
             <ul className="space-y-1.5 text-xs text-slate-300">
               <li>Botão “+ Nova tabela” cria uma tabela no centro do canvas.</li>
               <li>Arraste as tabelas para reposicioná-las. Alt desativa o encaixe na grade.</li>

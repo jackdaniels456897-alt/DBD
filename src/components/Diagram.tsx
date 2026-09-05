@@ -13,6 +13,7 @@ import type {
   Point,
   Relationship,
   Table,
+  TableGroup,
 } from '../types';
 import {
   buildConnector,
@@ -59,6 +60,10 @@ interface Props {
   fitTick: number;
   svgRef: React.RefObject<SVGSVGElement | null>;
   diagramRef?: React.Ref<DiagramHandle>;
+  groups?: TableGroup[];
+  selectedGroup?: string | null;
+  onSelectGroup?: (id: string | null) => void;
+  onMoveGroup?: (delta: Point) => void;
 }
 
 type LinkDrag = {
@@ -74,6 +79,7 @@ type DragState = { pointerId: number } & (
   | { mode: 'pan'; startX: number; startY: number; ox: number; oy: number }
   | { mode: 'table'; name: string; dx: number; dy: number }
   | { mode: 'link'; drag: LinkDrag }
+  | { mode: 'group'; id: string; startX: number; startY: number }
 );
 
 function CrowFoot({
@@ -131,6 +137,10 @@ export default function Diagram({
   fitTick,
   svgRef,
   diagramRef,
+  groups = [],
+  selectedGroup = null,
+  onSelectGroup,
+  onMoveGroup,
 }: Props) {
   useImperativeHandle(
     diagramRef,
@@ -171,6 +181,30 @@ export default function Diagram({
     for (const t of tables) map.set(t.name, tableRect(t, positions));
     return map;
   }, [tables, positions]);
+
+  /** Rects envolventes para cada grupo: conteúdo + padding. */
+  const groupRects = useMemo(() => {
+    const map = new Map<string, Rect & { group: TableGroup }>();
+    for (const g of groups) {
+      const memberRects = g.tableNames
+        .map((n) => rects.get(n))
+        .filter(Boolean) as Rect[];
+      if (!memberRects.length) continue;
+      const pad = { top: 46, right: 16, bottom: 16, left: 16 };
+      const minX = Math.min(...memberRects.map((r) => r.x));
+      const minY = Math.min(...memberRects.map((r) => r.y));
+      const maxX = Math.max(...memberRects.map((r) => r.x + r.w));
+      const maxY = Math.max(...memberRects.map((r) => r.y + r.h));
+      map.set(g.id, {
+        x: minX - pad.left,
+        y: minY - pad.top,
+        w: maxX - minX + pad.left + pad.right,
+        h: maxY - minY + pad.top + pad.bottom,
+        group: g,
+      });
+    }
+    return map;
+  }, [groups, rects]);
 
   const toDiagram = useCallback(
     (clientX: number, clientY: number) => {
@@ -267,6 +301,11 @@ export default function Diagram({
       return;
     }
     const p = toDiagram(e.clientX, e.clientY);
+    if (drag.mode === 'group') {
+      onMoveGroup?.({ x: p.x - drag.startX, y: p.y - drag.startY });
+      dragRef.current = { ...drag, startX: p.x, startY: p.y };
+      return;
+    }
     if (drag.mode === 'table') {
       const snap = e.altKey ? 1 : 5;
       onMove(drag.name, {
@@ -428,6 +467,7 @@ export default function Diagram({
             if (e.button !== 0 || dragRef.current) return;
             e.preventDefault();
             onSelect(null);
+            onSelectGroup?.(null);
             dragRef.current = {
               mode: 'pan',
               pointerId: e.pointerId,
@@ -449,6 +489,86 @@ export default function Diagram({
         <rect width="100%" height="100%" fill="url(#dbd-grid)" pointerEvents="none" />
 
         <g id="dbd-viewport" transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
+          {/* ---------- table groups (rendered behind everything) ---------- */}
+          {[...groupRects.values()].map(({ group, x, y, w, h }) => {
+            const isSelectedGroup = selectedGroup === group.id;
+            const isConnectingGroup = linkDrag && group.tableNames.includes(linkDrag.srcTable);
+            return (
+              <g
+                key={group.id}
+                pointerEvents={linkDrag ? 'none' : undefined}
+                onPointerDown={(e) => {
+                  if (e.button !== 0 || dragRef.current || linkDrag) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onSelectGroup?.(group.id);
+                  const p = toDiagram(e.clientX, e.clientY);
+                  dragRef.current = {
+                    mode: 'group',
+                    id: group.id,
+                    startX: p.x,
+                    startY: p.y,
+                    pointerId: e.pointerId,
+                  };
+                  svgRef.current?.setPointerCapture(e.pointerId);
+                }}
+                style={{ cursor: 'grab' }}
+              >
+                <rect
+                  x={x}
+                  y={y}
+                  width={w}
+                  height={h}
+                  rx={14}
+                  fill={isConnectingGroup ? '#064e3b' : '#1e293b'}
+                  fillOpacity={isConnectingGroup ? 0.35 : 0.22}
+                  stroke={isSelectedGroup ? '#f59e0b' : isConnectingGroup ? '#34d399' : '#475569'}
+                  strokeWidth={isSelectedGroup || isConnectingGroup ? 2 : 1.3}
+                  strokeDasharray={isSelectedGroup ? '0' : '7 5'}
+                />
+                <rect
+                  x={x}
+                  y={y}
+                  width={w}
+                  height={30}
+                  rx={14}
+                  fill={isSelectedGroup ? '#78350f' : '#0f172a'}
+                  fillOpacity={0.85}
+                />
+                <text
+                  x={x + 12}
+                  y={y + 20}
+                  fontSize={11}
+                  fontWeight={700}
+                  fontFamily={MONO}
+                  fill={isSelectedGroup ? '#fbbf24' : '#94a3b8'}
+                  pointerEvents="none"
+                >
+                  {group.name}
+                </text>
+                {editMode && (
+                  <circle
+                    cx={x + w - 14}
+                    cy={y + 15}
+                    r={8}
+                    fill="#0f172a"
+                    stroke="#4ade80"
+                    strokeWidth={1.2}
+                    style={{ cursor: 'pointer' }}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                      // no-op: group itself is already selected
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // toggle add current table to group (not meaningful here)
+                    }}
+                  />
+                )}
+              </g>
+            );
+          })}
+
           {/* ---------- connectors ---------- */}
           {connectors.map(({ rel, a, b, path, color }) => {
             const isActive =
@@ -478,7 +598,7 @@ export default function Diagram({
                 <path d={path.d} fill="none" stroke="transparent" strokeWidth={16} />
                 <CrowFoot x={a.x} y={a.y} dir={a.dir} card={rel.fromCard} color={color} active={isActive} />
                 <CrowFoot x={b.x} y={b.y} dir={b.dir} card={rel.toCard} color={color} active={isActive} />
-                {(showLabels || isActive) && (
+                {(showLabels || (editMode && isActive && !linkDrag)) && (
                   <g>
                     <rect
                       x={path.label.x - labelWidth / 2}
@@ -621,6 +741,7 @@ export default function Diagram({
                   e.preventDefault();
                   e.stopPropagation();
                   onSelect(table.name);
+                  onSelectGroup?.(null);
                   const p = toDiagram(e.clientX, e.clientY);
                   dragRef.current = { mode: 'table', name: table.name, dx: p.x - r.x, dy: p.y - r.y, pointerId: e.pointerId };
                   setDraggingTable(true);
@@ -658,6 +779,17 @@ export default function Diagram({
                 >
                   {table.columns.length}
                 </text>
+                {groups.filter((g) => g.tableNames.includes(table.name)).map((g) => (
+                  <g key={g.id} pointerEvents="none">
+                    <circle
+                      cx={r.x + 14 + groups.filter((gg) => gg.tableNames.includes(table.name)).indexOf(g) * 9}
+                      cy={r.y + 60}
+                      r={3}
+                      fill="#f59e0b"
+                      fillOpacity={0.8}
+                    />
+                  </g>
+                ))}
 
                 {table.columns.map((col, i) => {
                   const y = r.y + HEADER_H + i * ROW_H;

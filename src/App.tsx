@@ -13,7 +13,7 @@ import {
   removeVisualConnection,
 } from './lib/visualRelations';
 import { SAMPLES } from './lib/samples';
-import type { ConnectorStyle, Point } from './types';
+import type { ConnectorStyle, Point, TableGroup } from './types';
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
 const MODIFIER_LABEL = IS_MAC ? '⌘' : 'Ctrl';
@@ -21,6 +21,7 @@ const MODIFIER_LABEL = IS_MAC ? '⌘' : 'Ctrl';
 const LS_TEXT = 'qdbd.text';
 const LS_POS = 'qdbd.positions';
 const LS_OPTS = 'qdbd.opts';
+const LS_GROUPS = 'qdbd.groups';
 
 interface Options {
   connector: ConnectorStyle;
@@ -49,6 +50,14 @@ export default function App() {
   const [text, setText] = useState<string>(() => localStorage.getItem(LS_TEXT) ?? SAMPLES[0].text);
   const [positions, setPositions] = useState<Record<string, Point>>(() => loadJSON(LS_POS, {}));
   const [opts, setOpts] = useState<Options>(() => loadJSON(LS_OPTS, DEFAULT_OPTS));
+  const [groups, setGroups] = useState<TableGroup[]>(() => {
+    try {
+      const raw = localStorage.getItem(LS_GROUPS);
+      return raw ? (JSON.parse(raw) as TableGroup[]) : [];
+    } catch {
+      return [];
+    }
+  });
   const [selected, setSelected] = useState<string | null>(null);
   const [showExport, setShowExport] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
@@ -65,6 +74,9 @@ export default function App() {
   const namePromptInput = useRef<HTMLInputElement | null>(null);
 
   const [editMode, setEditMode] = useState(false);
+  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
+  const [showGroupsPanel, setShowGroupsPanel] = useState(false);
+  const [groupPrompt, setGroupPrompt] = useState<{ resolve: (name: string | null) => void } | null>(null);
   const [tablePrompt, setTablePrompt] = useState<{
     screen: Point;
     position?: Point;
@@ -181,6 +193,11 @@ export default function App() {
   }, [positions]);
 
   useEffect(() => {
+    const id = setTimeout(() => localStorage.setItem(LS_GROUPS, JSON.stringify(groups)), 300);
+    return () => clearTimeout(id);
+  }, [groups]);
+
+  useEffect(() => {
     localStorage.setItem(LS_OPTS, JSON.stringify(opts));
   }, [opts]);
 
@@ -251,6 +268,7 @@ export default function App() {
       text,
       positions,
       opts,
+      groups,
     };
     const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
     downloadBlob(blob, 'quickdbd-projeto.json');
@@ -269,10 +287,14 @@ export default function App() {
           if (data.positions && typeof data.positions === 'object') {
             setPositions(data.positions);
           }
+          if (Array.isArray(data.groups)) {
+            setGroups(data.groups);
+          }
           if (data.opts && typeof data.opts === 'object') {
             setOpts((prev) => ({ ...prev, ...data.opts }));
           }
           setSelected(null);
+          setSelectedGroup(null);
           setTimeout(() => setFitTick((t) => t + 1), 60);
           flash('Projeto importado (layout restaurado!)');
         } else {
@@ -285,6 +307,58 @@ export default function App() {
     reader.readAsText(file);
     e.target.value = ''; // reset
   };
+
+  /* ---------- table groups ---------- */
+  const addTableToGroup = useCallback((groupId: string, tableName: string) => {
+    setGroups((prev) =>
+      prev.map((g) =>
+        g.id === groupId && !g.tableNames.includes(tableName)
+          ? { ...g, tableNames: [...g.tableNames, tableName] }
+          : g,
+      ),
+    );
+  }, []);
+
+  const removeTableFromGroup = useCallback((groupId: string, tableName: string) => {
+    setGroups((prev) =>
+      prev.map((g) =>
+        g.id === groupId ? { ...g, tableNames: g.tableNames.filter((n) => n !== tableName) } : g,
+      ),
+    );
+  }, []);
+
+  const createGroup = useCallback((name: string, tableNames: string[] = []) => {
+    const id = `g_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    setGroups((prev) => [...prev, { id, name: name || `Grupo ${prev.length + 1}`, tableNames }]);
+    return id;
+  }, []);
+
+  const deleteGroup = useCallback((id: string) => {
+    setGroups((prev) => prev.filter((g) => g.id !== id));
+    setSelectedGroup(null);
+  }, []);
+
+  const renameGroup = useCallback((id: string, name: string) => {
+    setGroups((prev) => prev.map((g) => (g.id === id ? { ...g, name } : g)));
+  }, []);
+
+  const moveTablesTogether = useCallback(
+    (delta: Point) => {
+      if (!selectedGroup) return;
+      const grp = groups.find((g) => g.id === selectedGroup);
+      if (!grp) return;
+      setPositions((prev) => {
+        const next = { ...prev };
+        for (const name of grp.tableNames) {
+          if (next[name]) {
+            next[name] = { x: next[name].x + delta.x, y: next[name].y + delta.y };
+          }
+        }
+        return next;
+      });
+    },
+    [groups, selectedGroup],
+  );
 
   /* ---------- resizable split ---------- */
   const startSplitDrag = (e: React.PointerEvent) => {
@@ -341,7 +415,9 @@ export default function App() {
                   onMouseDown={() => {
                     setText(s.text);
                     setPositions({});
+                    setGroups([]);
                     setSelected(null);
+                    setSelectedGroup(null);
                     setTimeout(() => setFitTick((t) => t + 1), 60);
                   }}
                   className="block w-full px-3 py-2 text-left hover:bg-slate-700"
@@ -357,7 +433,9 @@ export default function App() {
         <button
           onClick={() => {
             setText('');
+            setGroups([]);
             setSelected(null);
+            setSelectedGroup(null);
           }}
           className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
         >
@@ -370,6 +448,75 @@ export default function App() {
         >
           + Nova tabela
         </button>
+        <div className="relative">
+          <button
+            onClick={() => setShowGroupsPanel((s) => !s)}
+            onBlur={() => setTimeout(() => setShowGroupsPanel(false), 180)}
+            className={`rounded-md border px-3 py-1.5 text-xs transition ${
+              groups.length
+                ? 'border-amber-500/60 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25'
+                : 'border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700'
+            }`}
+            title="Agrupar tabelas em regiões nomeadas"
+          >
+            📁 Grupos{groups.length ? ` (${groups.length})` : ''}
+          </button>
+          {showGroupsPanel && (
+            <div
+              className="absolute left-0 top-full z-40 mt-1 w-72 rounded-lg border border-slate-700 bg-slate-800 p-2 shadow-xl"
+              onMouseDown={(e) => e.stopPropagation()}
+            >
+              <div className="mb-2 flex items-center justify-between px-1">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Grupos</span>
+                <button
+                  onClick={() => setGroupPrompt({ resolve: (name) => name && createGroup(name, selected ? [selected] : []) })}
+                  className="text-[11px] font-medium text-amber-300 hover:text-amber-200"
+                >
+                  + Novo grupo
+                </button>
+              </div>
+              {groups.length === 0 ? (
+                <p className="px-1 py-2 text-[11px] text-slate-500">Selecione uma tabela e clique em “+ Novo grupo” para começar.</p>
+              ) : (
+                <ul className="space-y-1">
+                  {groups.map((g) => (
+                    <li key={g.id} className={`rounded px-2 py-1 ${selectedGroup === g.id ? 'bg-amber-500/20' : 'hover:bg-slate-700/60'}`}>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-amber-400"
+                          title="Grupo selecionado"
+                        />
+                        <input
+                          value={g.name}
+                          onChange={(e) => renameGroup(g.id, e.target.value)}
+                          className="min-w-0 flex-1 bg-transparent text-xs text-slate-100 outline-none focus:text-amber-200"
+                          placeholder="Nome do grupo"
+                        />
+                        <button
+                          onClick={() => setSelectedGroup(selectedGroup === g.id ? null : g.id)}
+                          className="text-[10px] text-slate-400 hover:text-amber-300"
+                          title={selectedGroup === g.id ? 'Deselecionar' : 'Selecionar'}
+                        >
+                          {selectedGroup === g.id ? '●' : '○'}
+                        </button>
+                        <button
+                          onClick={() => deleteGroup(g.id)}
+                          className="text-[10px] text-slate-500 hover:text-rose-400"
+                          title="Excluir grupo"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <p className="mt-0.5 pl-5 text-[10px] text-slate-500">
+                        {g.tableNames.length} tabela{g.tableNames.length === 1 ? '' : 's'}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
         <button
           onClick={handleAutoLayout}
           className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
@@ -556,6 +703,34 @@ export default function App() {
               </div>
             </details>
 
+            {selectedGroup && (
+              <span className="ml-2 flex items-center gap-1.5 rounded-full border border-amber-500/60 bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-200">
+                📁 {groups.find((g) => g.id === selectedGroup)?.name ?? 'Grupo'}
+                {selected && groups.find((g) => g.id === selectedGroup)?.tableNames.includes(selected) ? (
+                  <button
+                    onMouseDown={() => {
+                      removeTableFromGroup(selectedGroup, selected);
+                      flash(`"${selected}" removida do grupo.`);
+                    }}
+                    className="ml-1 text-amber-300 hover:text-amber-100"
+                    title={`Remover "${selected}" do grupo`}
+                  >
+                    ✕
+                  </button>
+                ) : selected ? (
+                  <button
+                    onMouseDown={() => {
+                      addTableToGroup(selectedGroup, selected);
+                      flash(`"${selected}" adicionada ao grupo.`);
+                    }}
+                    className="ml-1 text-amber-300 hover:text-amber-100"
+                    title={`Adicionar "${selected}" ao grupo`}
+                  >
+                    +
+                  </button>
+                ) : null}
+              </span>
+            )}
             <span className="ml-auto text-[11px] text-slate-500">
               {selected ? (
                 <>
@@ -585,6 +760,10 @@ export default function App() {
             fitTick={fitTick}
             svgRef={svgRef}
             diagramRef={diagramRef}
+            groups={groups}
+            selectedGroup={selectedGroup}
+            onSelectGroup={setSelectedGroup}
+            onMoveGroup={moveTablesTogether}
           />
         </section>
       </div>
@@ -597,6 +776,12 @@ export default function App() {
         <span className={warningCount ? 'text-amber-400' : ''}>⚠ {warningCount} aviso(s)</span>
         <span className="text-slate-700">|</span>
         <span>{movedTables} posições memorizadas</span>
+        {groups.length > 0 && (
+          <>
+            <span className="text-slate-700">|</span>
+            <span className="text-amber-300">📁 {groups.length} grupo{groups.length === 1 ? '' : 's'}</span>
+          </>
+        )}
         <span className="ml-auto">
           Segure <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">{MODIFIER_LABEL}</kbd> para editar visualmente • duplo-clique cria tabela • Esc cancela
         </span>
@@ -606,6 +791,67 @@ export default function App() {
         <div role="status" className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-slate-700 bg-slate-800 px-4 py-2 text-xs text-slate-100 shadow-xl">
           {toast}
         </div>
+      )}
+
+      {groupPrompt && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onPointerDown={() => setGroupPrompt(null)}
+          />
+          <div
+            className="fixed left-1/2 top-1/3 z-50 w-64 -translate-x-1/2 rounded-lg border border-amber-500/60 bg-slate-900 p-3 shadow-2xl"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const el = e.currentTarget.querySelector('input');
+                const name = (el as HTMLInputElement)?.value.trim() ?? '';
+                setGroupPrompt(null);
+                if (name) {
+                  const grp = createGroup(name, selected ? [selected] : []);
+                  setSelectedGroup(grp);
+                  if (selected) flash(`Grupo "${name}" criado com "${selected}" nele.`);
+                  else flash(`Grupo "${name}" criado.`);
+                }
+              }}
+            >
+              <label className="mb-1 block text-[11px] font-medium text-amber-300">
+                Nome do grupo
+              </label>
+              <input
+                autoFocus
+                defaultValue=""
+                maxLength={40}
+                placeholder="Ex.: Autenticação"
+                className="w-full rounded border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm text-white outline-none focus:border-amber-500"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <p className="mt-1.5 text-[10px] leading-snug text-slate-500">
+                {selected
+                  ? `O grupo nascerá com a tabela "${selected}" incluída.`
+                  : 'Você poderá adicionar/remover tabelas depois.'}
+              </p>
+              <div className="mt-3 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setGroupPrompt(null)}
+                  className="rounded border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-700"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="rounded bg-amber-400 px-2.5 py-1 text-xs font-semibold text-slate-900 hover:bg-amber-300"
+                >
+                  Criar
+                </button>
+              </div>
+            </form>
+          </div>
+        </>
       )}
 
       {tablePrompt && (
