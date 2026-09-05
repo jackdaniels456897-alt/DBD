@@ -128,14 +128,15 @@ function stripQuotes(value: string) {
 
 /** Parses a single column line. Returns null when the line makes no sense at all. */
 function parseColumnLine(raw: string, line: number, diags: Diagnostic[]): Column | null {
-  const trimmed = raw.trim().replace(/,+$/, '');
+  const trimmed = splitSchemaComment(raw).code.trim().replace(/,+$/, '');
   if (!trimmed) return null;
 
   let body = trimmed;
   let bracket = '';
-  const bracketMatch = trimmed.match(/^(.*?)\s*\[(.*)\]\s*$/);
+  const bracketMatch = trimmed.match(/^(.*?)\s*\[(.*)\](.*)$/);
   if (bracketMatch) {
-    body = bracketMatch[1].trim();
+    // Accept legacy visual edits that placed an inline FK after the attributes.
+    body = `${bracketMatch[1]} ${bracketMatch[3]}`.trim();
     bracket = bracketMatch[2];
   } else if (trimmed.includes('[') && !trimmed.includes(']')) {
     diags.push({
@@ -333,18 +334,39 @@ function parseColumnLine(raw: string, line: number, diags: Diagnostic[]): Column
   return col;
 }
 
-function splitAttributes(value: string): string[] {
+export function splitSchemaComment(raw: string): { code: string; comment: string } {
+  let quote = '';
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (quote) {
+      if (ch === '\\' || (ch === quote && raw[i + 1] === quote)) i++;
+      else if (ch === quote) quote = '';
+    } else if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+    } else if ((i === 0 || /\s/.test(raw[i - 1])) &&
+      (ch === '#' || raw.slice(i, i + 2) === '//')) {
+      const code = raw.slice(0, i).trimEnd();
+      return { code, comment: raw.slice(code.length) };
+    }
+  }
+  return { code: raw, comment: '' };
+}
+
+export function splitAttributes(value: string): string[] {
   const out: string[] = [];
   let depth = 0;
   let cur = '';
   let quote: string | null = null;
-  for (const ch of value) {
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
     if (quote) {
       cur += ch;
-      if (ch === quote) quote = null;
+      if ((ch === '\\' || (ch === quote && value[i + 1] === quote)) && i + 1 < value.length) {
+        cur += value[++i];
+      } else if (ch === quote) quote = null;
       continue;
     }
-    if (ch === '"' || ch === "'") {
+    if (ch === '"' || ch === "'" || ch === '`') {
       quote = ch;
       cur += ch;
       continue;
@@ -367,7 +389,6 @@ export function parseSchema(text: string): ParsedSchema {
   const lineKinds: LineKind[] = lines.map(() => 'blank');
   const diagnostics: Diagnostic[] = [];
   const tables: Table[] = [];
-  const bracketRefs = new Set<string>();
 
   let current: Table | null = null;
   let mode: 'brace' | 'dash' | null = null;
@@ -593,5 +614,5 @@ export function parseSchema(text: string): ParsedSchema {
 
   diagnostics.sort((a, b) => a.line - b.line || (a.severity === b.severity ? 0 : a.severity === 'error' ? -1 : 1));
 
-  return { tables: uniqueTables, relationships, diagnostics, lineKinds, bracketRefs };
+  return { tables: uniqueTables, relationships, diagnostics, lineKinds };
 }

@@ -79,12 +79,14 @@ created_at datetime`}</pre>
           <section>
             <h3 className="mb-2 text-sm font-semibold text-sky-400">4. Dicas do diagrama</h3>
             <ul className="space-y-1.5 text-xs text-slate-300">
-              <li>• Arraste as tabelas — a posição é salva automaticamente.</li>
-              <li>• Segure Alt ao arrastar para desligar o encaixe na grade.</li>
-              <li>• Roda do mouse: zoom. Arrastar o fundo: mover o canvas.</li>
-              <li>• Passe o mouse sobre uma tabela para isolar suas conexões.</li>
-              <li>• Clique em um problema na lista para pular direto à linha.</li>
-              <li>• Exporte em SQL (5 bancos), PNG, SVG ou Markdown.</li>
+              <li>Arraste uma alça à esquerda ou à direita da coluna até a coluna de destino.</li>
+              <li>Comece pela PK/UNIQUE ou pela FK: o editor identifica qual coluna recebe a referência.</li>
+              <li>Se as colunas forem equivalentes, a coluna de origem recebe a FK.</li>
+              <li>Esc cancela o arrasto. Soltar no fundo não altera o schema.</li>
+              <li>Para apagar, passe o mouse sobre a conexão e clique no botão de remover.</li>
+              <li>Arraste as tabelas para reposicioná-las. Alt desativa o encaixe na grade.</li>
+              <li>Roda do mouse: zoom. Arrastar o fundo: mover o canvas.</li>
+              <li>Clique em um problema para selecionar a linha correspondente no editor.</li>
             </ul>
           </section>
         </div>

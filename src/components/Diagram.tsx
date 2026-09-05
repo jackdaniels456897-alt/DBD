@@ -10,13 +10,16 @@ import {
   buildConnector,
   computeAnchors,
   contentBounds,
+  hitColumn,
   HEADER_H,
   ROW_H,
   rowCenterY,
   tableRect,
   type ConnectorPath,
+  type ColumnHit,
   type Rect,
 } from '../lib/geometry';
+import { resolveVisualConnection } from '../lib/visualRelations';
 
 const PALETTE = [
   '#38bdf8', '#f472b6', '#facc15', '#4ade80',
@@ -46,60 +49,16 @@ type LinkDrag = {
   srcTable: string;
   srcCol: string;
   srcIndex: number;
+  side: 1 | -1;
   start: Point;
   cursor: Point;
 };
 
-type LinkTarget =
-  | { kind: 'column'; table: string; col: string }
-  | { kind: 'connector'; rel: Relationship };
-
-type DragState =
+type DragState = { pointerId: number } & (
   | { mode: 'pan'; startX: number; startY: number; ox: number; oy: number }
   | { mode: 'table'; name: string; dx: number; dy: number }
-  | { mode: 'link'; drag: LinkDrag };
-
-/** distance from point P to segment AB */
-function segDist(p: Point, a: Point, b: Point): number {
-  const abx = b.x - a.x;
-  const aby = b.y - a.y;
-  const len2 = abx * abx + aby * aby || 1;
-  const t = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2));
-  return Math.hypot(p.x - (a.x + t * abx), p.y - (a.y + t * aby));
-}
-
-function pathDist(p: Point, d: string): number {
-  const cmds = d.slice(1).match(/[MLQ][-+0-9.]+(?:\s[-+0-9.]+)+/g);
-  if (!cmds) return Infinity;
-  let min = Infinity;
-  let cur: Point | null = null;
-  for (const c of cmds) {
-    const n2 = c.match(/[-+0-9.]+/g)?.map(Number) ?? [];
-    const kind = c[0];
-    if (kind === 'M') cur = { x: n2[0], y: n2[1] };
-    else if (kind === 'L' && cur) {
-      const next = { x: n2[0], y: n2[1] };
-      min = Math.min(min, segDist(p, cur, next));
-      cur = next;
-    } else if (kind === 'Q' && cur && n2.length >= 4) {
-      const cp = { x: n2[0], y: n2[1] };
-      const next = { x: n2[2], y: n2[3] };
-      let last = cur;
-      for (let s = 1; s <= 8; s++) {
-        const t = s / 8;
-        const mt = 1 - t;
-        const pt = {
-          x: mt * mt * last.x + 2 * mt * t * cp.x + t * t * next.x,
-          y: mt * mt * last.y + 2 * mt * t * cp.y + t * t * next.y,
-        };
-        min = Math.min(min, segDist(p, last, pt));
-        last = pt;
-      }
-      cur = next;
-    }
-  }
-  return min;
-}
+  | { mode: 'link'; drag: LinkDrag }
+);
 
 function CrowFoot({
   x,
@@ -161,7 +120,7 @@ export default function Diagram({
   const [hoverTable, setHoverTable] = useState<string | null>(null);
   const [hoverRel, setHoverRel] = useState<string | null>(null);
   const [linkDrag, setLinkDrag] = useState<LinkDrag | null>(null);
-  const [linkTarget, setLinkTarget] = useState<LinkTarget | null>(null);
+  const [linkTarget, setLinkTarget] = useState<ColumnHit | null>(null);
   const [draggingTable, setDraggingTable] = useState(false);
   const dragRef = useRef<DragState | null>(null);
 
@@ -182,6 +141,57 @@ export default function Diagram({
     [svgRef],
   );
 
+  const hitTarget = useCallback(
+    (x: number, y: number) => hitColumn(tables, positions, { x, y }, 10 / viewRef.current.k),
+    [tables, positions],
+  );
+
+  const cancelDrag = useCallback(() => {
+    const pointerId = dragRef.current?.pointerId;
+    dragRef.current = null;
+    setLinkDrag(null);
+    setLinkTarget(null);
+    setDraggingTable(false);
+    const svg = svgRef.current;
+    if (pointerId !== undefined && svg?.hasPointerCapture(pointerId)) {
+      svg.releasePointerCapture(pointerId);
+    }
+  }, [svgRef]);
+
+  useEffect(() => {
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && dragRef.current) {
+        event.preventDefault();
+        cancelDrag();
+      }
+    };
+    window.addEventListener('keydown', escape);
+    return () => window.removeEventListener('keydown', escape);
+  }, [cancelDrag]);
+
+  const beginLink = (e: React.PointerEvent, table: Table, index: number, side: 1 | -1) => {
+    if (e.button !== 0 || dragRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const point = toDiagram(e.clientX, e.clientY);
+    const link: LinkDrag = {
+      srcTable: table.name,
+      srcCol: table.columns[index].name,
+      srcIndex: index,
+      side,
+      start: point,
+      cursor: point,
+    };
+    dragRef.current = { mode: 'link', drag: link, pointerId: e.pointerId };
+    setLinkDrag(link);
+    setLinkTarget(null);
+    setHoverRel(null);
+    onSelect(table.name);
+    // The SVG stays mounted when hover changes; a column handle might not.
+    svgRef.current?.setPointerCapture(e.pointerId);
+    svgRef.current?.focus({ preventScroll: true });
+  };
+
   const fit = useCallback(() => {
     const wrap = wrapRef.current;
     if (!wrap || !tables.length) return;
@@ -201,15 +211,15 @@ export default function Diagram({
 
   const didInitialFit = useRef(false);
   useLayoutEffect(() => {
-    if (!didInitialFit.current && tables.length) {
+    if (!didInitialFit.current && tables.length && tables.every((t) => positions[t.name])) {
       didInitialFit.current = true;
       fit();
     }
-  }, [tables.length, fit]);
+  }, [tables, positions, fit]);
 
   const onPointerMove = (e: React.PointerEvent) => {
     const drag = dragRef.current;
-    if (!drag) return;
+    if (!drag || drag.pointerId !== e.pointerId) return;
     if (drag.mode === 'pan') {
       setView((v) => ({ ...v, x: drag.ox + (e.clientX - drag.startX), y: drag.oy + (e.clientY - drag.startY) }));
       return;
@@ -229,53 +239,41 @@ export default function Diagram({
 
   const endDrag = (e: React.PointerEvent) => {
     const drag = dragRef.current;
-    dragRef.current = null;
-    setDraggingTable(false);
-    const el = e.target as Element;
-    if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
-    if (drag?.mode === 'link') {
-      const { drag: d } = drag;
-      const p = toDiagram(e.clientX, e.clientY);
-      const target = hitTarget(p.x, p.y);
-      // se não moveu quase nada, trata como simples clique na alça: faz nada
-      const moved = Math.hypot(p.x - d.start.x, p.y - d.start.y);
-      if (moved > 4 && target) {
-        const sameColumn =
-          target.kind === 'column' &&
-          target.table === d.srcTable &&
-          target.col === d.srcCol;
-        const ownConnector =
-          target.kind === 'connector' &&
-          ((target.rel.fromTable === d.srcTable && target.rel.fromColumn === d.srcCol) ||
-            (target.rel.toTable === d.srcTable && target.rel.toColumn === d.srcCol));
-        if (target.kind === 'column' && !sameColumn) {
-          // soltou sobre uma coluna: CRIA a conexão
-          onLink(d.srcTable, d.srcCol, target.table, target.col);
-        } else if (target.kind === 'connector' && !ownConnector) {
-          // soltou sobre outra conexão: REMOVE a conexão alvo
-          onRemove(target.rel.id);
-        }
-      }
-      setLinkDrag(null);
-      setLinkTarget(null);
-    }
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    const point = toDiagram(e.clientX, e.clientY);
+    const target = hitTarget(point.x, point.y);
+    const bounds = svgRef.current?.getBoundingClientRect();
+    const inside = bounds && e.clientX >= bounds.left && e.clientX <= bounds.right &&
+      e.clientY >= bounds.top && e.clientY <= bounds.bottom;
+    cancelDrag();
+    if (drag.mode !== 'link' || !target || !inside) return;
+    const source = drag.drag;
+    const moved = Math.hypot(point.x - source.start.x, point.y - source.start.y) * viewRef.current.k;
+    if (moved < 4 || (target.table === source.srcTable && target.col === source.srcCol)) return;
+    onLink(source.srcTable, source.srcCol, target.table, target.col);
   };
 
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
+  useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
-    const r = svg.getBoundingClientRect();
-    const mx = e.clientX - r.left;
-    const my = e.clientY - r.top;
-    setView((v) => {
-      const k = Math.min(2.5, Math.max(0.25, v.k * (e.deltaY < 0 ? 1.12 : 0.89)));
-      const ratio = k / v.k;
-      return { k, x: mx - (mx - v.x) * ratio, y: my - (my - v.y) * ratio };
-    });
-  };
+    const wheel = (e: WheelEvent) => {
+      e.preventDefault();
+      if (dragRef.current) return;
+      const r = svg.getBoundingClientRect();
+      const mx = e.clientX - r.left;
+      const my = e.clientY - r.top;
+      setView((v) => {
+        const k = Math.min(2.5, Math.max(0.25, v.k * (e.deltaY < 0 ? 1.12 : 0.89)));
+        const ratio = k / v.k;
+        return { k, x: mx - (mx - v.x) * ratio, y: my - (my - v.y) * ratio };
+      });
+    };
+    svg.addEventListener('wheel', wheel, { passive: false });
+    return () => svg.removeEventListener('wheel', wheel);
+  }, [svgRef]);
 
   const zoomBy = (factor: number) => {
+    if (dragRef.current) return;
     const wrap = wrapRef.current;
     const cx = (wrap?.clientWidth ?? 600) / 2;
     const cy = (wrap?.clientHeight ?? 400) / 2;
@@ -315,57 +313,13 @@ export default function Diagram({
     }[];
   }, [relationships, tables, rects, connector, colorful]);
 
-  /** O que está sob o ponteiro: primeiro a coluna (mais perto do mouse), depois a conexão. */
-  const hitTarget = useCallback(
-    (x: number, y: number): LinkTarget | null => {
-      const p = { x, y };
-      const margin = 6 / viewRef.current.k;
-      let bestCol: { table: string; col: string; d: number } | null = null;
-      for (const t of tables) {
-        const r = rects.get(t.name);
-        if (!r) continue;
-        const dx =
-          p.x < r.x ? r.x - p.x : p.x > r.x + r.w ? p.x - (r.x + r.w) : 0;
-        const dy =
-          p.y < r.y ? r.y - p.y : p.y > r.y + r.h ? p.y - (r.y + r.h) : 0;
-        const d = Math.hypot(dx, dy);
-        if (d <= margin && (!bestCol || d < bestCol.d)) {
-          let bestInTable: string | null = null;
-          let bestInTableD = Infinity;
-          for (let i = 0; i < t.columns.length; i++) {
-            const cy = r.y + rowCenterY(i);
-            const dd = Math.abs(p.y - cy);
-            if (dd < bestInTableD) {
-              bestInTableD = dd;
-              bestInTable = t.columns[i].name;
-            }
-          }
-          if (bestInTable) bestCol = { table: t.name, col: bestInTable, d };
-        }
-      }
-      if (bestCol) return { kind: 'column', table: bestCol.table, col: bestCol.col };
-      let bestRel: LinkTarget | null = null;
-      let bestRelD = 10;
-      for (const c of connectors) {
-        const d = Math.min(
-          pathDist(p, c.path.d),
-          Math.hypot(p.x - c.path.label.x, p.y - c.path.label.y) - 12,
-        );
-        if (d < bestRelD) {
-          bestRelD = d;
-          bestRel = { kind: 'connector', rel: c.rel };
-        }
-      }
-      return bestRel;
-    },
-    [tables, rects, connectors],
-  );
-
-  const linkTargetValid = !!linkDrag && !!linkTarget &&
-    (linkTarget.kind === 'column'
-      ? !(linkTarget.table === linkDrag.srcTable && linkTarget.col === linkDrag.srcCol)
-      : !((linkTarget.rel.fromTable === linkDrag.srcTable && linkTarget.rel.fromColumn === linkDrag.srcCol) ||
-          (linkTarget.rel.toTable === linkDrag.srcTable && linkTarget.rel.toColumn === linkDrag.srcCol)));
+  const previewConnection = linkDrag && linkTarget ? resolveVisualConnection(
+    tables,
+    relationships,
+    { table: linkDrag.srcTable, column: linkDrag.srcCol },
+    { table: linkTarget.table, column: linkTarget.col },
+  ) : null;
+  const linkTargetValid = !!previewConnection;
 
   const cursor = linkDrag
     ? linkTargetValid
@@ -395,12 +349,24 @@ export default function Diagram({
     <div ref={wrapRef} className="relative min-h-0 flex-1 overflow-hidden bg-[#0b1220]">
       <svg
         ref={svgRef}
-        className="h-full w-full touch-none"
+        className="h-full w-full touch-none select-none outline-none"
+        tabIndex={0}
+        aria-label="Diagrama de banco de dados. Arraste entre colunas pelos dois lados das tabelas."
         style={{ cursor }}
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
-        onPointerLeave={endDrag}
-        onWheel={onWheel}
+        onPointerCancel={(e) => {
+          if (dragRef.current?.pointerId === e.pointerId) cancelDrag();
+        }}
+        onLostPointerCapture={(e) => {
+          if (dragRef.current?.pointerId === e.pointerId) cancelDrag();
+        }}
+        onPointerLeave={() => {
+          if (!dragRef.current) {
+            setHoverTable(null);
+            setHoverRel(null);
+          }
+        }}
       >
         <defs>
           <pattern id="dbd-grid" width="24" height="24" patternUnits="userSpaceOnUse">
@@ -417,16 +383,18 @@ export default function Diagram({
           height="100%"
           fill="#0b1220"
           onPointerDown={(e) => {
-            if (linkDrag) return; // conector sendo arrastado — não inicia pan
+            if (e.button !== 0 || dragRef.current) return;
+            e.preventDefault();
             onSelect(null);
             dragRef.current = {
               mode: 'pan',
+              pointerId: e.pointerId,
               startX: e.clientX,
               startY: e.clientY,
               ox: view.x,
               oy: view.y,
             };
-            (e.target as Element).setPointerCapture(e.pointerId);
+            svgRef.current?.setPointerCapture(e.pointerId);
           }}
         />
         <rect width="100%" height="100%" fill="url(#dbd-grid)" pointerEvents="none" />
@@ -434,101 +402,39 @@ export default function Diagram({
         <g id="dbd-viewport" transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
           {/* ---------- connectors ---------- */}
           {connectors.map(({ rel, a, b, path, color }) => {
-            const isLinkHit = linkTarget?.kind === 'connector' && linkTarget.rel.id === rel.id;
             const isActive =
               hoverRel === rel.id ||
-              isLinkHit ||
               (!!activeTable && (rel.fromTable === activeTable || rel.toTable === activeTable));
-            const dimmed =
-              (!!activeTable || !!hoverRel || !!linkDrag) && !isActive;
+            const dimmed = !!linkDrag || ((!!activeTable || !!hoverRel) && !isActive);
+            const labelWidth = (rel.fromColumn.length + rel.toColumn.length + 4) * 6.6 + 18;
+            const deleteX = path.label.x;
+            const deleteY = path.label.y - 26;
             return (
               <g
                 key={rel.id}
                 opacity={dimmed ? 0.16 : 1}
-                onPointerEnter={() => setHoverRel(rel.id)}
-                onPointerLeave={() => setHoverRel(null)}
+                pointerEvents={linkDrag ? 'none' : undefined}
+                onPointerEnter={() => { if (!dragRef.current) setHoverRel(rel.id); }}
+                onPointerLeave={() => { if (!dragRef.current) setHoverRel(null); }}
               >
-                {/* alvo invisível para concluir um arrasto por cima da linha */}
-                {/* área invisível de drop durante o arrasto; o ponteiro segue até o svg para concluir */}
-              {linkDrag && <path d={path.d} fill="none" stroke="transparent" strokeWidth={22} pointerEvents="none" />}
-                {isActive && (
-                  <g>
-                    <rect
-                      x={path.label.x - (rel.fromColumn.length + rel.toColumn.length + 3) * 3.3 - 9}
-                      y={path.label.y - 12}
-                      width={(rel.fromColumn.length + rel.toColumn.length + 3) * 6.6 + 18}
-                      height={24}
-                      fill="transparent"
-                      style={{ pointerEvents: 'none' }}
-                    />
-                    <circle
-                      cx={path.label.x}
-                      cy={path.label.y}
-                      r={9}
-                      fill="#0f172a"
-                      stroke="#f43f5e"
-                      strokeWidth={1.5}
-                    />
-                    <path
-                      d={`M ${path.label.x - 3} ${path.label.y - 3} L ${path.label.x + 3} ${
-                        path.label.y + 3
-                      } M ${path.label.x + 3} ${path.label.y - 3} L ${path.label.x - 3} ${path.label.y + 3}`}
-                      stroke="#f43f5e"
-                      strokeWidth={1.6}
-                      strokeLinecap="round"
-                    />
-                    <text
-                      x={path.label.x}
-                      y={path.label.y - 14}
-                      textAnchor="middle"
-                      fontSize={10}
-                      fontFamily={MONO}
-                      fill="#fda4af"
-                    >
-                      {isLinkHit ? 'solte p/ remover' : 'remover'}
-                    </text>
-                  </g>
-                )}
                 {/* halo makes crossings readable */}
                 <path d={path.d} fill="none" stroke="#0b1220" strokeWidth={isActive ? 9 : 7} strokeLinecap="round" />
-                {isLinkHit && (
-                  <path
-                    d={path.d}
-                    fill="none"
-                    stroke="#f43f5e"
-                    strokeWidth={5}
-                    strokeLinecap="round"
-                    opacity={0.5}
-                  />
-                )}
                 <path
                   d={path.d}
                   fill="none"
-                  stroke={isLinkHit ? '#f43f5e' : color}
+                  stroke={color}
                   strokeWidth={isActive ? 2.8 : 1.8}
                   strokeLinecap="round"
                 />
                 <path d={path.d} fill="none" stroke="transparent" strokeWidth={16} />
-                {isActive && (
-                  <circle
-                    cx={path.label.x}
-                    cy={path.label.y}
-                    r={14}
-                    fill="transparent"
-                    onPointerUp={(e) => {
-                      e.stopPropagation();
-                      onRemove(rel.id);
-                    }}
-                  />
-                )}
                 <CrowFoot x={a.x} y={a.y} dir={a.dir} card={rel.fromCard} color={color} active={isActive} />
                 <CrowFoot x={b.x} y={b.y} dir={b.dir} card={rel.toCard} color={color} active={isActive} />
                 {(showLabels || isActive) && (
-                  <g pointerEvents="none">
+                  <g>
                     <rect
-                      x={path.label.x - ((rel.fromColumn.length + rel.toColumn.length + 3) * 6.6 + 18) / 2}
+                      x={path.label.x - labelWidth / 2}
                       y={path.label.y - 10}
-                      width={(rel.fromColumn.length + rel.toColumn.length + 3) * 6.6 + 18}
+                      width={labelWidth}
                       height={20}
                       rx={10}
                       fill="#0f172a"
@@ -542,9 +448,45 @@ export default function Diagram({
                       fontSize={11}
                       fontFamily={MONO}
                       fill={color}
+                      pointerEvents="none"
                     >
-                      {rel.fromColumn} → {rel.toColumn}
+                      {rel.fromColumn} {'->'} {rel.toColumn}
                     </text>
+                  </g>
+                )}
+                {isActive && !linkDrag && (
+                  <g data-interactive="true">
+                    <rect x={deleteX - 14} y={deleteY - 14} width={28} height={40} fill="transparent" />
+                    <g
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Remover conexão ${rel.fromTable}.${rel.fromColumn} para ${rel.toTable}.${rel.toColumn}`}
+                      style={{ cursor: 'pointer' }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!dragRef.current) onRemove(rel.id);
+                      }}
+                      onFocus={() => setHoverRel(rel.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Delete') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          onRemove(rel.id);
+                          svgRef.current?.focus({ preventScroll: true });
+                        }
+                      }}
+                    >
+                      <title>Remover conexão</title>
+                      <circle cx={deleteX} cy={deleteY} r={11} fill="#351821" stroke="#f43f5e" strokeWidth={1.4} />
+                      <path
+                        d={`M ${deleteX - 3} ${deleteY - 3} l 6 6 M ${deleteX + 3} ${deleteY - 3} l -6 6`}
+                        stroke="#fda4af"
+                        strokeWidth={1.6}
+                        strokeLinecap="round"
+                        pointerEvents="none"
+                      />
+                    </g>
                   </g>
                 )}
               </g>
@@ -553,15 +495,27 @@ export default function Diagram({
 
           {/* ---------- preview of the connector being dragged ---------- */}
           {linkDrag && (
-            <g pointerEvents="none">
+            <g pointerEvents="none" data-interactive="true">
               {(() => {
                 const fr = rects.get(linkDrag.srcTable);
                 if (!fr) return null;
                 const srcY = fr.y + rowCenterY(linkDrag.srcIndex);
-                const dir: 1 | -1 = linkDrag.cursor.x >= fr.x + fr.w / 2 ? 1 : -1;
+                const dir = linkDrag.side;
                 const a = { x: fr.x + (dir === 1 ? fr.w : 0), y: srcY, dir };
-                const b = { x: linkDrag.cursor.x, y: linkDrag.cursor.y, dir: 1 as const };
-                const preview = buildConnector(connector, a, b, fr, fr, false);
+                const targetRect = linkTarget ? rects.get(linkTarget.table) : undefined;
+                const selfLoop = !!linkTarget && linkTarget.table === linkDrag.srcTable;
+                const targetSide = selfLoop ? dir : linkTarget?.side;
+                const b = targetRect && linkTarget && targetSide ? {
+                  x: targetRect.x + (targetSide === 1 ? targetRect.w : 0),
+                  y: targetRect.y + rowCenterY(linkTarget.index),
+                  dir: targetSide,
+                } : {
+                  x: linkDrag.cursor.x,
+                  y: linkDrag.cursor.y,
+                  dir: (linkDrag.cursor.x >= a.x ? -1 : 1) as 1 | -1,
+                };
+                const preview = buildConnector(connector, a, b, fr,
+                  targetRect ?? { x: b.x, y: b.y, w: 0, h: 0 }, selfLoop);
                 const ok = linkTargetValid;
                 const color = ok ? '#38bdf8' : '#64748b';
                 return (
@@ -576,20 +530,6 @@ export default function Diagram({
                     />
                     <circle cx={linkDrag.cursor.x} cy={linkDrag.cursor.y} r={5} fill="none" stroke={color} strokeWidth={1.6} />
                     <circle cx={linkDrag.cursor.x} cy={linkDrag.cursor.y} r={2} fill={color} />
-                    {linkTarget?.kind === 'column' && ok && (
-                      <rect
-                        x={rects.get(linkTarget.table)?.x ?? fr.x}
-                        y={rects.get(linkTarget.table)?.y ?? fr.y}
-                        width={rects.get(linkTarget.table)?.w ?? fr.w}
-                        height={rects.get(linkTarget.table)?.h ?? fr.h}
-                        rx={10}
-                        fill="none"
-                        stroke="#38bdf8"
-                        strokeWidth={2}
-                        strokeDasharray="5 4"
-                        opacity={0.9}
-                      />
-                    )}
                   </>
                 );
               })()}
@@ -602,6 +542,7 @@ export default function Diagram({
             if (!r) return null;
             const isSelected = selected === table.name;
             const isActive = activeTable === table.name;
+            const isLinkTarget = linkTargetValid && linkTarget?.table === table.name;
             const related =
               !!activeTable &&
               relationships.some(
@@ -609,7 +550,7 @@ export default function Diagram({
                   (rel.fromTable === activeTable && rel.toTable === table.name) ||
                   (rel.toTable === activeTable && rel.fromTable === table.name),
               );
-            const dimmed = !!activeTable && !isActive && !related;
+            const dimmed = !linkDrag && !!activeTable && !isActive && !related;
             const hasError = errorTables.has(table.name);
             const radius = 10;
             const headerPath = `M ${r.x} ${r.y + radius} Q ${r.x} ${r.y} ${r.x + radius} ${r.y} L ${
@@ -623,15 +564,18 @@ export default function Diagram({
                 key={table.name}
                 opacity={dimmed ? 0.35 : 1}
                 filter="url(#dbd-shadow)"
-                onPointerEnter={() => setHoverTable(table.name)}
-                onPointerLeave={() => setHoverTable(null)}
+                onPointerEnter={() => { if (!dragRef.current) setHoverTable(table.name); }}
+                onPointerLeave={() => { if (!dragRef.current) setHoverTable(null); }}
+                style={{ cursor: linkDrag ? cursor : draggingTable ? 'grabbing' : 'grab' }}
                 onPointerDown={(e) => {
+                  if (e.button !== 0 || dragRef.current) return;
+                  e.preventDefault();
                   e.stopPropagation();
                   onSelect(table.name);
                   const p = toDiagram(e.clientX, e.clientY);
-                  dragRef.current = { mode: 'table', name: table.name, dx: p.x - r.x, dy: p.y - r.y };
+                  dragRef.current = { mode: 'table', name: table.name, dx: p.x - r.x, dy: p.y - r.y, pointerId: e.pointerId };
                   setDraggingTable(true);
-                  (e.target as Element).setPointerCapture(e.pointerId);
+                  svgRef.current?.setPointerCapture(e.pointerId);
                 }}
               >
                 <rect
@@ -641,8 +585,8 @@ export default function Diagram({
                   height={r.h}
                   rx={radius}
                   fill="#0f172a"
-                  stroke={hasError ? '#f43f5e' : isSelected ? '#38bdf8' : isActive ? '#64748b' : '#1e293b'}
-                  strokeWidth={isSelected || hasError ? 2 : 1.2}
+                  stroke={isLinkTarget ? '#38bdf8' : hasError ? '#f43f5e' : isSelected ? '#38bdf8' : isActive ? '#64748b' : '#1e293b'}
+                  strokeWidth={isLinkTarget || isSelected || hasError ? 2 : 1.2}
                 />
                 <path d={headerPath} fill={hasError ? '#4c1d24' : '#1e293b'} />
                 <text
@@ -670,7 +614,8 @@ export default function Diagram({
                   const y = r.y + HEADER_H + i * ROW_H;
                   const cy = y + ROW_H / 2 + 4;
                   const rowKey = `${table.name}.${col.name}`;
-                  const rowActive = highlightedRows.has(rowKey);
+                  const dropTarget = isLinkTarget && linkTarget?.col === col.name;
+                  const rowActive = dropTarget || (!linkDrag && highlightedRows.has(rowKey));
                   return (
                     <g key={col.name}>
                       {(i % 2 === 1 || rowActive) && (
@@ -679,8 +624,8 @@ export default function Diagram({
                           y={y}
                           width={r.w - 2}
                           height={ROW_H}
-                          fill={rowActive ? '#1d4ed8' : '#0b1220'}
-                          opacity={rowActive ? 0.35 : 0.45}
+                          fill={dropTarget ? '#036a83' : rowActive ? '#1d4ed8' : '#0b1220'}
+                          opacity={dropTarget ? 0.65 : rowActive ? 0.35 : 0.45}
                         />
                       )}
                       <text x={r.x + 12} y={cy} fontSize={11.5} fontFamily={MONO} fill="#cbd5e1">
@@ -713,44 +658,35 @@ export default function Diagram({
                         {col.type}
                       </text>
 
-                      {/* alça de conexão: arraste até uma coluna de outra tabela para ligar;
-                          arraste até outra linha de conexão para removê-la */}
-                      {(!hoverTable || hoverTable === table.name) && (
+                      {([-1, 1] as const).map((side) => (
                         <g
-                          onPointerDown={(e) => {
-                            e.stopPropagation();
-                            onSelect(table.name);
-                            const p = toDiagram(e.clientX, e.clientY);
-                            const link: LinkDrag = {
-                              srcTable: table.name,
-                              srcCol: col.name,
-                              srcIndex: i,
-                              start: p,
-                              cursor: p,
-                            };
-                            dragRef.current = { mode: 'link', drag: link };
-                            setLinkDrag(link);
-                            (e.target as Element).setPointerCapture(e.pointerId);
-                          }}
+                          key={side}
+                          data-interactive="true"
+                          data-port={`${table.name}.${col.name}`}
+                          data-side={side === -1 ? 'left' : 'right'}
+                          opacity={isActive || linkDrag ? 1 : 0.65}
+                          style={{ cursor: 'crosshair', transition: 'opacity 150ms ease' }}
+                          onPointerDown={(e) => beginLink(e, table, i, side)}
                         >
+                          <title>{`Arraste ${table.name}.${col.name} para outra coluna. PK e FK funcionam nos dois sentidos.`}</title>
                           <rect
-                            x={r.x + r.w - 12}
+                            x={r.x + (side === 1 ? r.w : 0) - 10}
                             y={y}
                             width={20}
                             height={ROW_H}
                             fill="transparent"
-                            style={{ cursor: 'crosshair' }}
                           />
                           <circle
-                            cx={r.x + r.w}
+                            cx={r.x + (side === 1 ? r.w : 0)}
                             cy={y + ROW_H / 2}
-                            r={3.6}
-                            fill="#0b1220"
-                            stroke={col.pk || col.unique ? '#4ade80' : '#38bdf8'}
+                            r={dropTarget ? 5 : 4}
+                            fill={dropTarget ? '#38bdf8' : '#0b1220'}
+                            stroke={dropTarget ? '#a5f3fc' : col.pk || col.unique ? '#4ade80' : '#38bdf8'}
                             strokeWidth={1.5}
+                            pointerEvents="none"
                           />
                         </g>
-                      )}
+                      ))}
                     </g>
                   );
                 })}
@@ -759,6 +695,14 @@ export default function Diagram({
           })}
         </g>
       </svg>
+
+      {linkDrag && (
+        <div role="status" className="pointer-events-none absolute bottom-5 right-4 max-w-[65%] text-right text-xs text-sky-300">
+          {previewConnection
+            ? `FK ${previewConnection.foreign.table.name}.${previewConnection.foreign.column.name} -> ${previewConnection.primary.table.name}.${previewConnection.primary.column.name}`
+            : 'Solte sobre a coluna de destino. Esc cancela.'}
+        </div>
+      )}
 
       {/* zoom controls */}
       <div className="pointer-events-auto absolute bottom-4 left-4 flex items-center gap-1 rounded-lg border border-slate-700/70 bg-slate-900/90 p-1 shadow-lg backdrop-blur">
@@ -790,7 +734,10 @@ export default function Diagram({
       {!tables.length && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="text-center text-slate-600">
-            <div className="mb-3 text-5xl">🗂️</div>
+            <svg aria-hidden="true" className="mx-auto mb-3 h-10 w-10" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <path d="M3 9h18M9 9v11M3 14h18" />
+            </svg>
             <p className="text-sm">Comece a escrever o schema à esquerda</p>
             <p className="mt-1 text-xs text-slate-700">o diagrama aparece enquanto você digita</p>
           </div>

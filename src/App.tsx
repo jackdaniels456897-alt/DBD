@@ -7,6 +7,7 @@ import HelpModal from './components/HelpModal';
 import { parseSchema } from './lib/parser';
 import { autoLayout, contentBounds, placeNewTables, tableRect } from './lib/geometry';
 import { exportPng, exportSvg } from './lib/export';
+import { createVisualConnection, removeVisualConnection } from './lib/visualRelations';
 import { SAMPLES } from './lib/samples';
 import type { ConnectorStyle, Point } from './types';
 
@@ -51,120 +52,42 @@ export default function App() {
   const editorRef = useRef<CodeEditorHandle>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const splitRef = useRef<HTMLDivElement>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const parsed = useMemo(() => parseSchema(text), [text]);
-  const { tables, relationships, diagnostics, lineKinds, bracketRefs } = parsed;
+  const { tables, relationships, diagnostics, lineKinds } = parsed;
+
+  const flash = useCallback((message: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(message);
+    toastTimer.current = setTimeout(() => setToast(null), 3200);
+  }, []);
+
+  useEffect(() => () => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+  }, []);
 
   /* ---------- visual editing: create / remove connectors ---------- */
   const handleLink = useCallback(
     (fromTable: string, fromCol: string, toTable: string, toCol: string) => {
-      if (fromTable === toTable && fromCol === toCol) return;
-      setText((prev) => {
-        const lines = prev.split('\n');
-        const headerIdx = lines.findIndex(
-          (l) => l.trim().replace(/\{$/, '').trim().toLowerCase() === fromTable.toLowerCase(),
-        );
-        if (headerIdx < 0) return prev;
-        const indentOf = (i: number) => lines[i].match(/^\s*/)?.[0] ?? '  ';
-        let colIdx = -1;
-        for (let i = headerIdx + 1; i < lines.length; i++) {
-          const t = lines[i].trim();
-          if (!t) {
-            if (colIdx > headerIdx + 1) break;
-            continue;
-          }
-          if (/^[-=~]{1,}$/.test(t)) continue;
-          if (t === '}' || (t.endsWith('{') && i > headerIdx)) break;
-          if (t.split(/\s+/)[0] === fromCol) {
-            colIdx = i;
-            break;
-          }
-        }
-
-        if (colIdx < 0) {
-          // coluna não existe: cria com tipo "int" e a referência
-          let insertAt: number;
-          if (lines[headerIdx].trim().endsWith('{')) {
-            let end = headerIdx + 1;
-            while (end < lines.length && lines[end].trim() !== '}') end++;
-            if (end >= lines.length) return prev;
-            insertAt = end;
-          } else {
-            insertAt = headerIdx + 2;
-            while (insertAt < lines.length && lines[insertAt].trim() !== '') insertAt++;
-          }
-          lines.splice(insertAt, 0, `${indentOf(insertAt)}${fromCol} int FK >- ${toTable}.${toCol}`);
-          return lines.join('\n');
-        }
-
-        // coluna existe: apende (ou substitui) a referência no final da linha
-        lines[colIdx] =
-          lines[colIdx]
-            .replace(/\s*(FK\s*)?[<>\-0]+\s*["']?[\w ]+\.["']?[\w$]+["']?/i, ' ')
-            .replace(/\s{2,}/g, ' ')
-            .trimEnd() +
-          ` FK >- ${toTable}.${toCol}`;
-        return lines.join('\n');
-      });
-      flash(`Conexão criada: ${fromTable}.${fromCol} → ${toTable}.${toCol}`);
+      const result = createVisualConnection(
+        text,
+        { table: fromTable, column: fromCol },
+        { table: toTable, column: toCol },
+      );
+      if (result.text !== text) setText(result.text);
+      flash(result.message);
     },
-    [],
+    [text, flash],
   );
 
   const handleRemove = useCallback(
     (id: string) => {
-      const rel = relationships.find((r) => r.id === id);
-      if (!rel) return;
-      const colKey = `${rel.fromColumn}::${rel.line}`;
-      setText((prev) => {
-        // relações de [ref: ...]: remove apenas o atributo, mantém a coluna
-        if (bracketRefs.has(colKey)) {
-          const re =
-            /\[(?!\s*\])(?:(?!\]).)*?ref\s*[:=]\s*(?:[<>\-0]+\s*)?(?:"[^"]*"|'[^']*'|[\w ]+)\s*\.\s*(?:"[^"]*"|'[^']*'|[\w$]+)(?:(?!\]).)*?\]/g;
-          return prev.replace(re, (m) => {
-            const tableM = m.match(/ref\s*[:=]\s*(?:[<>\-0]+\s*)?(?:"([^"]*)"|'([^']*)'|([\w ]+))\s*\.\s*(?:"([^"]*)"|'([^']*)'|([\w$]+))/i);
-            if (!tableM) return m;
-            const t = (tableM[1] ?? tableM[2] ?? tableM[3] ?? '').trim();
-            const c = (tableM[4] ?? tableM[5] ?? tableM[6] ?? '').trim();
-            if (
-              (t.toLowerCase() === rel.toTable.toLowerCase() && c.toLowerCase() === rel.toColumn.toLowerCase()) ||
-              (t.toLowerCase() === rel.fromTable.toLowerCase() && c.toLowerCase() === rel.fromColumn.toLowerCase())
-            ) {
-              const clean = m
-                .slice(1, -1)
-                .replace(re, '')
-                .replace(/^[,\s]+/, '')
-                .replace(/,\s*$/, '')
-                .trim();
-              return clean ? `[${clean}]` : '';
-            }
-            return m;
-          });
-        }
-        // relações em linha: remove o símbolo e o alvo (e o FK) da linha da coluna
-        const lines = prev.split('\n');
-        const headerIdx = lines.findIndex(
-          (l) => l.trim().replace(/\{$/, '').trim().toLowerCase() === rel.fromTable.toLowerCase(),
-        );
-        if (headerIdx < 0) return prev;
-        for (let i = headerIdx + 1; i < lines.length; i++) {
-          const t = lines[i].trim();
-          if (!t) continue;
-          if (/^[-=~]{1,}$/.test(t)) continue;
-          if (t === '}' || (t.endsWith('{') && i > headerIdx)) break;
-          if (t.split(/\s+/)[0] === rel.fromColumn) {
-            lines[i] = lines[i]
-              .replace(/\s*(FK\s*)?[<>\-0]+\s*["']?[\w ]+\.["']?[\w$]+["']?/i, ' ')
-              .replace(/\s{2,}/g, ' ')
-              .trimEnd();
-            return lines.join('\n');
-          }
-        }
-        return prev;
-      });
-      flash(`Conexão removida: ${rel.fromTable}.${rel.fromColumn} → ${rel.toTable}.${rel.toColumn}`);
+      const result = removeVisualConnection(text, id);
+      if (result.text !== text) setText(result.text);
+      flash(result.message);
     },
-    [relationships, bracketRefs],
+    [text, flash],
   );
 
   /* ---------- persistence ---------- */
@@ -217,11 +140,6 @@ export default function App() {
   const errorCount = diagnostics.filter((d) => d.severity === 'error').length;
   const warningCount = diagnostics.length - errorCount;
   const columnCount = tables.reduce((acc, t) => acc + t.columns.length, 0);
-
-  const flash = (message: string) => {
-    setToast(message);
-    setTimeout(() => setToast(null), 2200);
-  };
 
   /* ---------- actions ---------- */
   const handleMove = useCallback((name: string, p: Point) => {
@@ -512,15 +430,15 @@ export default function App() {
           {errorCount ? `✖ ${errorCount} erro(s)` : '✔ sem erros'}
         </span>
         <span className={warningCount ? 'text-amber-400' : ''}>⚠ {warningCount} aviso(s)</span>
-            <span className="text-slate-700">|</span>
-            <span>{movedTables} posições memorizadas</span>
-            <span className="ml-auto">
-              arraste os ● das colunas para ligar • solte sobre outra linha para removê-la • roda = zoom
-            </span>
+        <span className="text-slate-700">|</span>
+        <span>{movedTables} posições memorizadas</span>
+        <span className="ml-auto">
+          Conecte pelas alças dos dois lados, de PK para FK ou de FK para PK. Esc cancela.
+        </span>
       </footer>
 
       {toast && (
-        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-slate-700 bg-slate-800 px-4 py-2 text-xs text-slate-100 shadow-xl">
+        <div role="status" className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-slate-700 bg-slate-800 px-4 py-2 text-xs text-slate-100 shadow-xl">
           {toast}
         </div>
       )}

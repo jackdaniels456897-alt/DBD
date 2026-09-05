@@ -35,6 +35,7 @@ function buildStandaloneSvg(svg: SVGSVGElement, bounds: Rect, background: string
 
   // remove the interactive-only transparent hit areas
   clone.querySelectorAll('path[stroke="transparent"]').forEach((n) => n.remove());
+  clone.querySelectorAll('[data-interactive]').forEach((n) => n.remove());
 
   return new XMLSerializer().serializeToString(clone);
 }

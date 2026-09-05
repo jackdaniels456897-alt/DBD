@@ -37,6 +37,36 @@ export function tableRect(table: Table, positions: Record<string, Point>): Rect 
   return { x: p.x, y: p.y, w: tableWidth(table), h: tableHeight(table) };
 }
 
+export interface ColumnHit {
+  table: string;
+  col: string;
+  index: number;
+  side: 1 | -1;
+}
+
+export function hitColumn(
+  tables: Table[],
+  positions: Record<string, Point>,
+  point: Point,
+  margin = 10,
+): ColumnHit | null {
+  // Reverse paint order gives overlapping tables the same priority as the SVG.
+  for (let n = tables.length - 1; n >= 0; n--) {
+    const table = tables[n];
+    const rect = tableRect(table, positions);
+    if (point.x < rect.x - margin || point.x > rect.x + rect.w + margin) continue;
+    const index = Math.floor((point.y - rect.y - HEADER_H) / ROW_H);
+    if (index < 0 || index >= table.columns.length) continue;
+    return {
+      table: table.name,
+      col: table.columns[index].name,
+      index,
+      side: point.x < rect.x + rect.w / 2 ? -1 : 1,
+    };
+  }
+  return null;
+}
+
 function overlaps(a: Rect, b: Rect, gap: number) {
   return (
     a.x < b.x + b.w + gap &&
@@ -197,7 +227,7 @@ export function buildConnector(
   const stub = 26;
 
   if (selfLoop) {
-    const x = Math.max(a.x, b.x) + 44;
+    const x = a.dir === -1 ? Math.min(a.x, b.x) - 44 : Math.max(a.x, b.x) + 44;
     const pts = [
       { x: a.x, y: a.y },
       { x, y: a.y },
