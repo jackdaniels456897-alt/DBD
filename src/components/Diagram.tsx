@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type {
   Cardinality,
   ConnectorStyle,
@@ -28,6 +36,11 @@ const PALETTE = [
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
+export interface DiagramHandle {
+  /** Returns the diagram-space and screen-space center of the visible canvas. */
+  getViewportCenter(): { diagram: Point; screen: Point } | null;
+}
+
 interface Props {
   tables: Table[];
   relationships: Relationship[];
@@ -35,14 +48,17 @@ interface Props {
   onMove: (name: string, p: Point) => void;
   onLink: (from: string, fromCol: string, to: string, toCol: string) => void;
   onRemove: (id: string) => void;
+  onCreateTableAt?: (screen: Point, diagram: Point) => void;
   connector: ConnectorStyle;
   colorful: boolean;
   showLabels: boolean;
+  editMode: boolean;
   selected: string | null;
   onSelect: (name: string | null) => void;
   errorTables: Set<string>;
   fitTick: number;
   svgRef: React.RefObject<SVGSVGElement | null>;
+  diagramRef?: React.Ref<DiagramHandle>;
 }
 
 type LinkDrag = {
@@ -104,15 +120,41 @@ export default function Diagram({
   onMove,
   onLink,
   onRemove,
+  onCreateTableAt,
   connector,
   colorful,
   showLabels,
+  editMode,
   selected,
   onSelect,
   errorTables,
   fitTick,
   svgRef,
+  diagramRef,
 }: Props) {
+  useImperativeHandle(
+    diagramRef,
+    () => ({
+      getViewportCenter() {
+        const wrap = wrapRef.current;
+        const svg = svgRef.current;
+        if (!wrap || !svg) return null;
+        const rect = svg.getBoundingClientRect();
+        const screen = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        const v = viewRef.current;
+        return {
+          screen,
+          diagram: {
+            x: (rect.width / 2 - v.x) / v.k,
+            y: (rect.height / 2 - v.y) / v.k,
+          },
+        };
+      },
+    }),
+    // svgRef is stable
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [diagramRef],
+  );
   const wrapRef = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ x: 40, y: 40, k: 1 });
   const viewRef = useRef(view);
@@ -170,7 +212,7 @@ export default function Diagram({
   }, [cancelDrag]);
 
   const beginLink = (e: React.PointerEvent, table: Table, index: number, side: 1 | -1) => {
-    if (e.button !== 0 || dragRef.current) return;
+    if (e.button !== 0 || dragRef.current || !editMode) return;
     e.preventDefault();
     e.stopPropagation();
     const point = toDiagram(e.clientX, e.clientY);
@@ -325,7 +367,7 @@ export default function Diagram({
     ? linkTargetValid
       ? 'crosshair'
       : 'not-allowed'
-    : hoverRel
+    : hoverRel && editMode
       ? 'pointer'
       : draggingTable
         ? 'grabbing'
@@ -396,6 +438,13 @@ export default function Diagram({
             };
             svgRef.current?.setPointerCapture(e.pointerId);
           }}
+          onDoubleClick={(e) => {
+            if (!editMode || !onCreateTableAt) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const point = toDiagram(e.clientX, e.clientY);
+            onCreateTableAt({ x: e.clientX, y: e.clientY }, point);
+          }}
         />
         <rect width="100%" height="100%" fill="url(#dbd-grid)" pointerEvents="none" />
 
@@ -454,7 +503,7 @@ export default function Diagram({
                     </text>
                   </g>
                 )}
-                {isActive && !linkDrag && (
+                {editMode && isActive && !linkDrag && (
                   <g data-interactive="true">
                     <rect x={deleteX - 14} y={deleteY - 14} width={28} height={40} fill="transparent" />
                     <g
@@ -658,7 +707,7 @@ export default function Diagram({
                         {col.type}
                       </text>
 
-                      {([-1, 1] as const).map((side) => (
+                      {editMode && ([-1, 1] as const).map((side) => (
                         <g
                           key={side}
                           data-interactive="true"
@@ -701,6 +750,16 @@ export default function Diagram({
           {previewConnection
             ? `FK ${previewConnection.foreign.table.name}.${previewConnection.foreign.column.name} -> ${previewConnection.primary.table.name}.${previewConnection.primary.column.name}`
             : 'Solte sobre a coluna de destino. Esc cancela.'}
+        </div>
+      )}
+
+      {editMode && !linkDrag && (
+        <div
+          className="pointer-events-none absolute left-1/2 top-3 flex -translate-x-1/2 items-center gap-2 rounded-full border border-sky-500/60 bg-sky-500/15 px-3 py-1 text-[11px] font-semibold text-sky-200 shadow-lg backdrop-blur"
+          role="status"
+        >
+          <span className="inline-block h-2 w-2 rounded-full bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.9)]" />
+          Modo edição visual — arraste as âncoras • duplo-clique cria tabela • X remove conexão
         </div>
       )}
 

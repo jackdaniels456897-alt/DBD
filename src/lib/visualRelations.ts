@@ -164,6 +164,73 @@ export function createVisualConnection(
   };
 }
 
+export interface TableCreation {
+  text: string;
+  status: 'created' | 'error';
+  message: string;
+  tableName: string;
+}
+
+/** Detects the syntax the user prefers, so new tables match the existing style. */
+function detectStyle(text: string): 'brace' | 'dash' {
+  const lines = text.split('\n');
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (/^[A-Za-z_][\w$ ]*\{$/.test(line)) return 'brace';
+    if (/^[A-Za-z_][\w$ ]*$/.test(line)) {
+      const idx = lines.indexOf(raw);
+      const next = lines[idx + 1]?.trim() ?? '';
+      if (/^[-=~]{1,}$/.test(next)) return 'dash';
+    }
+  }
+  return 'dash';
+}
+
+/** Guarantees a unique table name by appending _2, _3, ... if needed. */
+function uniqueName(name: string, existing: Table[]): string {
+  const taken = new Set(existing.map((t) => t.name.toLowerCase()));
+  if (!taken.has(name.toLowerCase())) return name;
+  let n = 2;
+  while (taken.has(`${name}_${n}`.toLowerCase())) n++;
+  return `${name}_${n}`;
+}
+
+export function createVisualTable(text: string, rawName: string): TableCreation {
+  const trimmed = rawName.trim();
+  if (!trimmed) {
+    return { text, status: 'error', message: 'Informe um nome para a nova tabela.', tableName: '' };
+  }
+  const quoted = /\s/.test(trimmed);
+  const identifier = trimmed.replace(/["'`]/g, '');
+  if (!/^[A-Za-z_][\w$ ]*$/.test(identifier)) {
+    return {
+      text,
+      status: 'error',
+      message: 'Use apenas letras, números, underscore e espaços. Comece por letra.',
+      tableName: '',
+    };
+  }
+  const schema = parseSchema(text);
+  const name = uniqueName(identifier, schema.tables);
+  const style = detectStyle(text);
+  const header = quoted ? `"${name}"` : name;
+  const block =
+    style === 'brace'
+      ? `${header} {\n  id int [pk, increment]\n}`
+      : `${header}\n-\nid int PK`;
+  const separator = text.length && !text.endsWith('\n\n') ? (text.endsWith('\n') ? '\n' : '\n\n') : '';
+  const next = `${text}${separator}${block}\n`;
+  if (!parseSchema(next).tables.some((t) => sameName(t.name, name))) {
+    return { text, status: 'error', message: 'Não foi possível criar a tabela.', tableName: '' };
+  }
+  return {
+    text: next,
+    status: 'created',
+    message: `Tabela "${name}" criada.`,
+    tableName: name,
+  };
+}
+
 export function removeVisualConnection(text: string, id: string): ConnectionEdit {
   const schema = parseSchema(text);
   const relation = schema.relationships.find((rel) => rel.id === id);

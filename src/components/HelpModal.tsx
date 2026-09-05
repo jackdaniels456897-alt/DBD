@@ -77,13 +77,25 @@ created_at datetime`}</pre>
           </section>
 
           <section>
-            <h3 className="mb-2 text-sm font-semibold text-sky-400">4. Dicas do diagrama</h3>
+            <h3 className="mb-2 text-sm font-semibold text-sky-400">4. Modo edição visual</h3>
             <ul className="space-y-1.5 text-xs text-slate-300">
-              <li>Arraste uma alça à esquerda ou à direita da coluna até a coluna de destino.</li>
+              <li>
+                Segure <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">Ctrl</kbd> (
+                Windows/Linux) ou <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">⌘</kbd>{' '}
+                (Mac) para ativar. As âncoras e o botão de remover aparecem só nesse modo.
+              </li>
+              <li>Arraste uma âncora até uma coluna de outra tabela para criar a conexão.</li>
               <li>Comece pela PK/UNIQUE ou pela FK: o editor identifica qual coluna recebe a referência.</li>
-              <li>Se as colunas forem equivalentes, a coluna de origem recebe a FK.</li>
-              <li>Esc cancela o arrasto. Soltar no fundo não altera o schema.</li>
-              <li>Para apagar, passe o mouse sobre a conexão e clique no botão de remover.</li>
+              <li>Clique no X vermelho perto do meio da linha para remover a conexão.</li>
+              <li>Duplo-clique no fundo abre o diálogo para criar uma nova tabela na posição.</li>
+              <li>Solte a tecla para voltar ao modo normal (arrastar/reposicionar).</li>
+            </ul>
+          </section>
+
+          <section>
+            <h3 className="mb-2 text-sm font-semibold text-sky-400">5. Dicas gerais</h3>
+            <ul className="space-y-1.5 text-xs text-slate-300">
+              <li>Botão “+ Nova tabela” cria uma tabela no centro do canvas.</li>
               <li>Arraste as tabelas para reposicioná-las. Alt desativa o encaixe na grade.</li>
               <li>Roda do mouse: zoom. Arrastar o fundo: mover o canvas.</li>
               <li>Clique em um problema para selecionar a linha correspondente no editor.</li>

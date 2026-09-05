@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CodeEditor, { type CodeEditorHandle } from './components/CodeEditor';
-import Diagram from './components/Diagram';
+import Diagram, { type DiagramHandle } from './components/Diagram';
 import DiagnosticsPanel from './components/DiagnosticsPanel';
 import ExportModal from './components/ExportModal';
 import HelpModal from './components/HelpModal';
 import { parseSchema } from './lib/parser';
 import { autoLayout, contentBounds, placeNewTables, tableRect } from './lib/geometry';
 import { exportPng, exportSvg } from './lib/export';
-import { createVisualConnection, removeVisualConnection } from './lib/visualRelations';
+import {
+  createVisualConnection,
+  createVisualTable,
+  removeVisualConnection,
+} from './lib/visualRelations';
 import { SAMPLES } from './lib/samples';
 import type { ConnectorStyle, Point } from './types';
+
+const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+const MODIFIER_LABEL = IS_MAC ? '⌘' : 'Ctrl';
 
 const LS_TEXT = 'qdbd.text';
 const LS_POS = 'qdbd.positions';
@@ -52,7 +59,16 @@ export default function App() {
   const editorRef = useRef<CodeEditorHandle>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const splitRef = useRef<HTMLDivElement>(null);
+  const diagramRef = useRef<DiagramHandle | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const namePromptInput = useRef<HTMLInputElement | null>(null);
+
+  const [editMode, setEditMode] = useState(false);
+  const [tablePrompt, setTablePrompt] = useState<{
+    screen: Point;
+    position?: Point;
+    value: string;
+  } | null>(null);
 
   const parsed = useMemo(() => parseSchema(text), [text]);
   const { tables, relationships, diagnostics, lineKinds } = parsed;
@@ -66,6 +82,68 @@ export default function App() {
   useEffect(() => () => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
   }, []);
+
+  /* ---------- edit mode: hold Ctrl (Windows/Linux) or ⌘ (Mac) ---------- */
+  useEffect(() => {
+    const isModifier = (e: KeyboardEvent) => e.key === 'Control' || e.key === 'Meta';
+    const onDown = (e: KeyboardEvent) => { if (isModifier(e)) setEditMode(true); };
+    const onUp = (e: KeyboardEvent) => { if (isModifier(e)) setEditMode(false); };
+    const onSyncFromEvent = (e: KeyboardEvent) => {
+      // Handles cases where the browser stole the initial keydown (e.g. shortcut menu).
+      setEditMode(e.ctrlKey || e.metaKey);
+    };
+    const clear = () => setEditMode(false);
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    window.addEventListener('keydown', onSyncFromEvent, true);
+    window.addEventListener('blur', clear);
+    document.addEventListener('visibilitychange', clear);
+    return () => {
+      window.removeEventListener('keydown', onDown);
+      window.removeEventListener('keyup', onUp);
+      window.removeEventListener('keydown', onSyncFromEvent, true);
+      window.removeEventListener('blur', clear);
+      document.removeEventListener('visibilitychange', clear);
+    };
+  }, []);
+
+  /* ---------- visual creation of tables ---------- */
+  const handleCreateTable = useCallback(
+    (name: string, position?: Point) => {
+      const result = createVisualTable(text, name);
+      if (result.status === 'created') {
+        if (position) {
+          setPositions((prev) => ({ ...prev, [result.tableName]: position }));
+        }
+        setText(result.text);
+        setSelected(result.tableName);
+      }
+      flash(result.message);
+      return result.status === 'created';
+    },
+    [text, flash],
+  );
+
+  const openTablePrompt = useCallback((screen: Point, position?: Point) => {
+    setTablePrompt({ screen, position, value: '' });
+  }, []);
+
+  const openHeaderTablePrompt = useCallback(() => {
+    const center = diagramRef.current?.getViewportCenter();
+    if (center) openTablePrompt(center.screen, center.diagram);
+    else openTablePrompt({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+  }, [openTablePrompt]);
+
+  const confirmTablePrompt = useCallback(() => {
+    if (!tablePrompt) return;
+    const ok = handleCreateTable(tablePrompt.value, tablePrompt.position);
+    if (ok) setTablePrompt(null);
+    else namePromptInput.current?.focus();
+  }, [handleCreateTable, tablePrompt]);
+
+  useEffect(() => {
+    if (tablePrompt) namePromptInput.current?.focus();
+  }, [tablePrompt]);
 
   /* ---------- visual editing: create / remove connectors ---------- */
   const handleLink = useCallback(
@@ -244,12 +322,30 @@ export default function App() {
           Limpar
         </button>
         <button
+          onClick={openHeaderTablePrompt}
+          className="rounded-md border border-emerald-500/60 bg-emerald-500/15 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/25"
+          title="Adiciona uma nova tabela ao schema"
+        >
+          + Nova tabela
+        </button>
+        <button
           onClick={handleAutoLayout}
           className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
           title="Reposiciona todas as tabelas em grade"
         >
           Auto layout
         </button>
+        <span
+          className={`ml-1 hidden items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium transition sm:inline-flex ${
+            editMode
+              ? 'border-sky-500/60 bg-sky-500/15 text-sky-200'
+              : 'border-slate-700 bg-slate-800/60 text-slate-400'
+          }`}
+          title={`Segure ${MODIFIER_LABEL} para exibir âncoras de conexão e o botão de remover`}
+        >
+          <span className={`inline-block h-1.5 w-1.5 rounded-full ${editMode ? 'bg-sky-400 shadow-[0_0_6px_rgba(56,189,248,0.9)]' : 'bg-slate-500'}`} />
+          {editMode ? `Modo edição (${MODIFIER_LABEL})` : `Segure ${MODIFIER_LABEL} p/ editar`}
+        </span>
 
         <div className="ml-auto flex items-center gap-2">
           <button
@@ -412,14 +508,17 @@ export default function App() {
             onMove={handleMove}
             onLink={handleLink}
             onRemove={handleRemove}
+            onCreateTableAt={(screen, position) => openTablePrompt(screen, position)}
             connector={opts.connector}
             colorful={opts.colorful}
             showLabels={opts.showLabels}
+            editMode={editMode}
             selected={selected}
             onSelect={setSelected}
             errorTables={errorTables}
             fitTick={fitTick}
             svgRef={svgRef}
+            diagramRef={diagramRef}
           />
         </section>
       </div>
@@ -433,7 +532,7 @@ export default function App() {
         <span className="text-slate-700">|</span>
         <span>{movedTables} posições memorizadas</span>
         <span className="ml-auto">
-          Conecte pelas alças dos dois lados, de PK para FK ou de FK para PK. Esc cancela.
+          Segure <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">{MODIFIER_LABEL}</kbd> para editar visualmente • duplo-clique cria tabela • Esc cancela
         </span>
       </footer>
 
@@ -441,6 +540,69 @@ export default function App() {
         <div role="status" className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-slate-700 bg-slate-800 px-4 py-2 text-xs text-slate-100 shadow-xl">
           {toast}
         </div>
+      )}
+
+      {tablePrompt && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onPointerDown={() => setTablePrompt(null)}
+          />
+          <div
+            className="fixed z-50 w-64 -translate-x-1/2 -translate-y-1/2 rounded-lg border border-emerald-500/60 bg-slate-900 p-3 shadow-2xl"
+            style={{
+              left: Math.min(Math.max(tablePrompt.screen.x, 140), window.innerWidth - 140),
+              top: Math.min(Math.max(tablePrompt.screen.y, 60), window.innerHeight - 100),
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                confirmTablePrompt();
+              }}
+            >
+              <label className="mb-1 block text-[11px] font-medium text-emerald-300">
+                Nome da nova tabela
+              </label>
+              <input
+                ref={namePromptInput}
+                value={tablePrompt.value}
+                onChange={(e) =>
+                  setTablePrompt((p) => (p ? { ...p, value: e.target.value } : p))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setTablePrompt(null);
+                  }
+                }}
+                placeholder="Ex.: Customers"
+                className="w-full rounded border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-500"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <p className="mt-1.5 text-[10px] leading-snug text-slate-500">
+                Letras, números e underscore. A tabela nasce com <code className="text-emerald-300">id</code> como PK.
+              </p>
+              <div className="mt-3 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setTablePrompt(null)}
+                  className="rounded border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-700"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="rounded bg-emerald-500 px-2.5 py-1 text-xs font-semibold text-slate-900 hover:bg-emerald-400"
+                >
+                  Criar
+                </button>
+              </div>
+            </form>
+          </div>
+        </>
       )}
 
       <ExportModal
