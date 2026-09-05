@@ -53,7 +53,119 @@ export default function App() {
   const splitRef = useRef<HTMLDivElement>(null);
 
   const parsed = useMemo(() => parseSchema(text), [text]);
-  const { tables, relationships, diagnostics, lineKinds } = parsed;
+  const { tables, relationships, diagnostics, lineKinds, bracketRefs } = parsed;
+
+  /* ---------- visual editing: create / remove connectors ---------- */
+  const handleLink = useCallback(
+    (fromTable: string, fromCol: string, toTable: string, toCol: string) => {
+      if (fromTable === toTable && fromCol === toCol) return;
+      setText((prev) => {
+        const lines = prev.split('\n');
+        const headerIdx = lines.findIndex(
+          (l) => l.trim().replace(/\{$/, '').trim().toLowerCase() === fromTable.toLowerCase(),
+        );
+        if (headerIdx < 0) return prev;
+        const indentOf = (i: number) => lines[i].match(/^\s*/)?.[0] ?? '  ';
+        let colIdx = -1;
+        for (let i = headerIdx + 1; i < lines.length; i++) {
+          const t = lines[i].trim();
+          if (!t) {
+            if (colIdx > headerIdx + 1) break;
+            continue;
+          }
+          if (/^[-=~]{1,}$/.test(t)) continue;
+          if (t === '}' || (t.endsWith('{') && i > headerIdx)) break;
+          if (t.split(/\s+/)[0] === fromCol) {
+            colIdx = i;
+            break;
+          }
+        }
+
+        if (colIdx < 0) {
+          // coluna não existe: cria com tipo "int" e a referência
+          let insertAt: number;
+          if (lines[headerIdx].trim().endsWith('{')) {
+            let end = headerIdx + 1;
+            while (end < lines.length && lines[end].trim() !== '}') end++;
+            if (end >= lines.length) return prev;
+            insertAt = end;
+          } else {
+            insertAt = headerIdx + 2;
+            while (insertAt < lines.length && lines[insertAt].trim() !== '') insertAt++;
+          }
+          lines.splice(insertAt, 0, `${indentOf(insertAt)}${fromCol} int FK >- ${toTable}.${toCol}`);
+          return lines.join('\n');
+        }
+
+        // coluna existe: apende (ou substitui) a referência no final da linha
+        lines[colIdx] =
+          lines[colIdx]
+            .replace(/\s*(FK\s*)?[<>\-0]+\s*["']?[\w ]+\.["']?[\w$]+["']?/i, ' ')
+            .replace(/\s{2,}/g, ' ')
+            .trimEnd() +
+          ` FK >- ${toTable}.${toCol}`;
+        return lines.join('\n');
+      });
+      flash(`Conexão criada: ${fromTable}.${fromCol} → ${toTable}.${toCol}`);
+    },
+    [],
+  );
+
+  const handleRemove = useCallback(
+    (id: string) => {
+      const rel = relationships.find((r) => r.id === id);
+      if (!rel) return;
+      const colKey = `${rel.fromColumn}::${rel.line}`;
+      setText((prev) => {
+        // relações de [ref: ...]: remove apenas o atributo, mantém a coluna
+        if (bracketRefs.has(colKey)) {
+          const re =
+            /\[(?!\s*\])(?:(?!\]).)*?ref\s*[:=]\s*(?:[<>\-0]+\s*)?(?:"[^"]*"|'[^']*'|[\w ]+)\s*\.\s*(?:"[^"]*"|'[^']*'|[\w$]+)(?:(?!\]).)*?\]/g;
+          return prev.replace(re, (m) => {
+            const tableM = m.match(/ref\s*[:=]\s*(?:[<>\-0]+\s*)?(?:"([^"]*)"|'([^']*)'|([\w ]+))\s*\.\s*(?:"([^"]*)"|'([^']*)'|([\w$]+))/i);
+            if (!tableM) return m;
+            const t = (tableM[1] ?? tableM[2] ?? tableM[3] ?? '').trim();
+            const c = (tableM[4] ?? tableM[5] ?? tableM[6] ?? '').trim();
+            if (
+              (t.toLowerCase() === rel.toTable.toLowerCase() && c.toLowerCase() === rel.toColumn.toLowerCase()) ||
+              (t.toLowerCase() === rel.fromTable.toLowerCase() && c.toLowerCase() === rel.fromColumn.toLowerCase())
+            ) {
+              const clean = m
+                .slice(1, -1)
+                .replace(re, '')
+                .replace(/^[,\s]+/, '')
+                .replace(/,\s*$/, '')
+                .trim();
+              return clean ? `[${clean}]` : '';
+            }
+            return m;
+          });
+        }
+        // relações em linha: remove o símbolo e o alvo (e o FK) da linha da coluna
+        const lines = prev.split('\n');
+        const headerIdx = lines.findIndex(
+          (l) => l.trim().replace(/\{$/, '').trim().toLowerCase() === rel.fromTable.toLowerCase(),
+        );
+        if (headerIdx < 0) return prev;
+        for (let i = headerIdx + 1; i < lines.length; i++) {
+          const t = lines[i].trim();
+          if (!t) continue;
+          if (/^[-=~]{1,}$/.test(t)) continue;
+          if (t === '}' || (t.endsWith('{') && i > headerIdx)) break;
+          if (t.split(/\s+/)[0] === rel.fromColumn) {
+            lines[i] = lines[i]
+              .replace(/\s*(FK\s*)?[<>\-0]+\s*["']?[\w ]+\.["']?[\w$]+["']?/i, ' ')
+              .replace(/\s{2,}/g, ' ')
+              .trimEnd();
+            return lines.join('\n');
+          }
+        }
+        return prev;
+      });
+      flash(`Conexão removida: ${rel.fromTable}.${rel.fromColumn} → ${rel.toTable}.${rel.toColumn}`);
+    },
+    [relationships, bracketRefs],
+  );
 
   /* ---------- persistence ---------- */
   useEffect(() => {
@@ -380,6 +492,8 @@ export default function App() {
             relationships={relationships}
             positions={positions}
             onMove={handleMove}
+            onLink={handleLink}
+            onRemove={handleRemove}
             connector={opts.connector}
             colorful={opts.colorful}
             showLabels={opts.showLabels}
@@ -398,9 +512,11 @@ export default function App() {
           {errorCount ? `✖ ${errorCount} erro(s)` : '✔ sem erros'}
         </span>
         <span className={warningCount ? 'text-amber-400' : ''}>⚠ {warningCount} aviso(s)</span>
-        <span className="text-slate-700">|</span>
-        <span>{movedTables} posições memorizadas</span>
-        <span className="ml-auto">Alt = sem encaixe na grade • roda = zoom • fundo = mover</span>
+            <span className="text-slate-700">|</span>
+            <span>{movedTables} posições memorizadas</span>
+            <span className="ml-auto">
+              arraste os ● das colunas para ligar • solte sobre outra linha para removê-la • roda = zoom
+            </span>
       </footer>
 
       {toast && (

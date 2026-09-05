@@ -367,6 +367,7 @@ export function parseSchema(text: string): ParsedSchema {
   const lineKinds: LineKind[] = lines.map(() => 'blank');
   const diagnostics: Diagnostic[] = [];
   const tables: Table[] = [];
+  const bracketRefs = new Set<string>();
 
   let current: Table | null = null;
   let mode: 'brace' | 'dash' | null = null;
@@ -592,5 +593,5 @@ export function parseSchema(text: string): ParsedSchema {
 
   diagnostics.sort((a, b) => a.line - b.line || (a.severity === b.severity ? 0 : a.severity === 'error' ? -1 : 1));
 
-  return { tables: uniqueTables, relationships, diagnostics, lineKinds };
+  return { tables: uniqueTables, relationships, diagnostics, lineKinds, bracketRefs };
 }

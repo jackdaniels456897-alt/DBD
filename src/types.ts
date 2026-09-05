@@ -64,6 +64,8 @@ export interface ParsedSchema {
   relationships: Relationship[];
   diagnostics: Diagnostic[];
   lineKinds: LineKind[];
+  /** true quando a relação veio de [ref: ...]; removê-la preserva a referência da coluna */
+  bracketRefs: Set<string>;
 }
 
 export interface Point {

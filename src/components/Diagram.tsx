@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { Cardinality, ConnectorStyle, Point, Relationship, Table } from '../types';
+import type {
+  Cardinality,
+  ConnectorStyle,
+  Point,
+  Relationship,
+  Table,
+} from '../types';
 import {
   buildConnector,
   computeAnchors,
@@ -8,6 +14,7 @@ import {
   ROW_H,
   rowCenterY,
   tableRect,
+  type ConnectorPath,
   type Rect,
 } from '../lib/geometry';
 
@@ -23,6 +30,8 @@ interface Props {
   relationships: Relationship[];
   positions: Record<string, Point>;
   onMove: (name: string, p: Point) => void;
+  onLink: (from: string, fromCol: string, to: string, toCol: string) => void;
+  onRemove: (id: string) => void;
   connector: ConnectorStyle;
   colorful: boolean;
   showLabels: boolean;
@@ -31,6 +40,61 @@ interface Props {
   errorTables: Set<string>;
   fitTick: number;
   svgRef: React.RefObject<SVGSVGElement | null>;
+}
+
+type LinkDrag = {
+  srcTable: string;
+  srcCol: string;
+  srcIndex: number;
+  srcSide: 'out' | 'in';
+  cursor: Point;
+};
+
+type DragState =
+  | { mode: 'pan'; startX: number; startY: number; ox: number; oy: number }
+  | { mode: 'table'; name: string; dx: number; dy: number }
+  | { mode: 'link'; drag: LinkDrag };
+
+/** distance from point P to segment AB */
+function segDist(p: Point, a: Point, b: Point): number {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const len2 = abx * abx + aby * aby || 1;
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2));
+  return Math.hypot(p.x - (a.x + t * abx), p.y - (a.y + t * aby));
+}
+
+function pathDist(p: Point, d: string): number {
+  const cmds = d.slice(1).match(/[MLQ][-+0-9.]+(?:\s[-+0-9.]+)+/g);
+  if (!cmds) return Infinity;
+  let min = Infinity;
+  let cur: Point | null = null;
+  for (const c of cmds) {
+    const n2 = c.match(/[-+0-9.]+/g)?.map(Number) ?? [];
+    const kind = c[0];
+    if (kind === 'M') cur = { x: n2[0], y: n2[1] };
+    else if (kind === 'L' && cur) {
+      const next = { x: n2[0], y: n2[1] };
+      min = Math.min(min, segDist(p, cur, next));
+      cur = next;
+    } else if (kind === 'Q' && cur && n2.length >= 4) {
+      const cp = { x: n2[0], y: n2[1] };
+      const next = { x: n2[2], y: n2[3] };
+      let last = cur;
+      for (let s = 1; s <= 8; s++) {
+        const t = s / 8;
+        const mt = 1 - t;
+        const pt = {
+          x: mt * mt * last.x + 2 * mt * t * cp.x + t * t * next.x,
+          y: mt * mt * last.y + 2 * mt * t * cp.y + t * t * next.y,
+        };
+        min = Math.min(min, segDist(p, last, pt));
+        last = pt;
+      }
+      cur = next;
+    }
+  }
+  return min;
 }
 
 function CrowFoot({
@@ -75,6 +139,8 @@ export default function Diagram({
   relationships,
   positions,
   onMove,
+  onLink,
+  onRemove,
   connector,
   colorful,
   showLabels,
@@ -90,11 +156,10 @@ export default function Diagram({
   viewRef.current = view;
   const [hoverTable, setHoverTable] = useState<string | null>(null);
   const [hoverRel, setHoverRel] = useState<string | null>(null);
-  const dragRef = useRef<
-    | null
-    | { mode: 'pan'; startX: number; startY: number; ox: number; oy: number }
-    | { mode: 'table'; name: string; dx: number; dy: number }
-  >(null);
+  const [linkDrag, setLinkDrag] = useState<LinkDrag | null>(null);
+  const [linkHit, setLinkHit] = useState<string | null>(null);
+  const [draggingTable, setDraggingTable] = useState(false);
+  const dragRef = useRef<DragState | null>(null);
 
   const rects = useMemo(() => {
     const map = new Map<string, Rect>();
@@ -146,17 +211,47 @@ export default function Diagram({
       return;
     }
     const p = toDiagram(e.clientX, e.clientY);
-    const snap = e.altKey ? 1 : 5;
-    onMove(drag.name, {
-      x: Math.round((p.x - drag.dx) / snap) * snap,
-      y: Math.round((p.y - drag.dy) / snap) * snap,
-    });
+    if (drag.mode === 'table') {
+      const snap = e.altKey ? 1 : 5;
+      onMove(drag.name, {
+        x: Math.round((p.x - drag.dx) / snap) * snap,
+        y: Math.round((p.y - drag.dy) / snap) * snap,
+      });
+      return;
+    }
+    setLinkDrag((d) => (d ? { ...d, cursor: p } : d));
+    setLinkHit(hitTest(p.x, p.y)?.id ?? null);
   };
 
   const endDrag = (e: React.PointerEvent) => {
+    const drag = dragRef.current;
     dragRef.current = null;
+    setDraggingTable(false);
     const el = e.target as Element;
     if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
+    if (drag?.mode === 'link') {
+      const p = toDiagram(e.clientX, e.clientY);
+      const { drag: d } = drag;
+      const hit = hitTest(p.x, p.y);
+      // soltar sobre outra conexão: a conexão alvo é removida
+      if (hit) {
+        const isOwn =
+          (hit.fromTable === d.srcTable && hit.fromColumn === d.srcCol) ||
+          (hit.toTable === d.srcTable && hit.toColumn === d.srcCol);
+        if (isOwn) {
+          setLinkDrag(null);
+          setLinkHit(null);
+          return;
+        }
+        // arrastou a alça de uma coluna: se não foi um clique simples, o alvo é removido
+        const moved = Math.hypot(p.x - d.cursor.x, p.y - d.cursor.y);
+        if (moved > 10) onRemove(hit.id);
+        else onLink(d.srcTable, d.srcCol, hit.toTable, hit.toColumn);
+        setLinkDrag(null);
+        setLinkHit(null);
+      }
+      setLinkDrag(null);
+    }
   };
 
   const onWheel = (e: React.WheelEvent) => {
@@ -208,10 +303,42 @@ export default function Diagram({
       rel: Relationship;
       a: { x: number; y: number; dir: 1 | -1 };
       b: { x: number; y: number; dir: 1 | -1 };
-      path: { d: string; label: Point };
+      path: ConnectorPath;
       color: string;
     }[];
   }, [relationships, tables, rects, connector, colorful]);
+
+  const hitTest = useCallback(
+    (x: number, y: number): Relationship | null => {
+      const p = { x, y };
+      let best: Relationship | null = null;
+      let bestDist = 8;
+      for (const c of connectors) {
+        const d = Math.min(pathDist(p, c.path.d), Math.hypot(p.x - c.path.label.x, p.y - c.path.label.y) - 12);
+        if (d < bestDist) {
+          bestDist = d;
+          best = c.rel;
+        }
+      }
+      return best;
+    },
+    [connectors],
+  );
+
+  const cursor = linkDrag
+    ? linkHit &&
+        !(
+          (linkHit.startsWith(`${linkDrag.srcTable}.`) &&
+            linkHit.includes(`.${linkDrag.srcCol}->`)) ||
+          linkHit.endsWith(`.${linkDrag.srcTable}.${linkDrag.srcCol}`)
+        )
+      ? 'not-allowed'
+      : 'crosshair'
+    : hoverRel
+      ? 'pointer'
+      : draggingTable
+        ? 'grabbing'
+        : 'default';
 
   const highlightedRows = useMemo(() => {
     const set = new Set<string>();
@@ -232,6 +359,7 @@ export default function Diagram({
       <svg
         ref={svgRef}
         className="h-full w-full touch-none"
+        style={{ cursor }}
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerLeave={endDrag}
@@ -252,6 +380,7 @@ export default function Diagram({
           height="100%"
           fill="#0b1220"
           onPointerDown={(e) => {
+            if (linkDrag) return; // conector sendo arrastado — não inicia pan
             onSelect(null);
             dragRef.current = {
               mode: 'pan',
@@ -262,7 +391,6 @@ export default function Diagram({
             };
             (e.target as Element).setPointerCapture(e.pointerId);
           }}
-          style={{ cursor: dragRef.current?.mode === 'pan' ? 'grabbing' : 'grab' }}
         />
         <rect width="100%" height="100%" fill="url(#dbd-grid)" pointerEvents="none" />
 
@@ -271,26 +399,92 @@ export default function Diagram({
           {connectors.map(({ rel, a, b, path, color }) => {
             const isActive =
               hoverRel === rel.id ||
+              linkHit === rel.id ||
               (!!activeTable && (rel.fromTable === activeTable || rel.toTable === activeTable));
-            const dimmed = (!!activeTable || !!hoverRel) && !isActive;
+            const dimmed =
+              (!!activeTable || !!hoverRel || !!linkDrag) &&
+              !isActive &&
+              !(linkHit === rel.id);
             return (
               <g
                 key={rel.id}
                 opacity={dimmed ? 0.16 : 1}
                 onPointerEnter={() => setHoverRel(rel.id)}
                 onPointerLeave={() => setHoverRel(null)}
-                style={{ cursor: 'pointer' }}
               >
+                {/* alvo invisível para concluir um arrasto por cima da linha */}
+                {/* área invisível de drop durante o arrasto; o ponteiro segue até o svg para concluir */}
+              {linkDrag && <path d={path.d} fill="none" stroke="transparent" strokeWidth={22} pointerEvents="none" />}
+                {isActive && (
+                  <g>
+                    <rect
+                      x={path.label.x - (rel.fromColumn.length + rel.toColumn.length + 3) * 3.3 - 9}
+                      y={path.label.y - 12}
+                      width={(rel.fromColumn.length + rel.toColumn.length + 3) * 6.6 + 18}
+                      height={24}
+                      fill="transparent"
+                      style={{ pointerEvents: 'none' }}
+                    />
+                    <circle
+                      cx={path.label.x}
+                      cy={path.label.y}
+                      r={9}
+                      fill="#0f172a"
+                      stroke="#f43f5e"
+                      strokeWidth={1.5}
+                    />
+                    <path
+                      d={`M ${path.label.x - 3} ${path.label.y - 3} L ${path.label.x + 3} ${
+                        path.label.y + 3
+                      } M ${path.label.x + 3} ${path.label.y - 3} L ${path.label.x - 3} ${path.label.y + 3}`}
+                      stroke="#f43f5e"
+                      strokeWidth={1.6}
+                      strokeLinecap="round"
+                    />
+                    <text
+                      x={path.label.x}
+                      y={path.label.y - 14}
+                      textAnchor="middle"
+                      fontSize={10}
+                      fontFamily={MONO}
+                      fill="#fda4af"
+                    >
+                      {linkHit === rel.id ? 'solte p/ remover' : 'remover'}
+                    </text>
+                  </g>
+                )}
                 {/* halo makes crossings readable */}
                 <path d={path.d} fill="none" stroke="#0b1220" strokeWidth={isActive ? 9 : 7} strokeLinecap="round" />
+                {linkHit === rel.id && (
+                  <path
+                    d={path.d}
+                    fill="none"
+                    stroke="#f43f5e"
+                    strokeWidth={5}
+                    strokeLinecap="round"
+                    opacity={0.5}
+                  />
+                )}
                 <path
                   d={path.d}
                   fill="none"
-                  stroke={color}
+                  stroke={linkHit === rel.id ? '#f43f5e' : color}
                   strokeWidth={isActive ? 2.8 : 1.8}
                   strokeLinecap="round"
                 />
                 <path d={path.d} fill="none" stroke="transparent" strokeWidth={16} />
+                {isActive && (
+                  <circle
+                    cx={path.label.x}
+                    cy={path.label.y}
+                    r={14}
+                    fill="transparent"
+                    onPointerUp={(e) => {
+                      e.stopPropagation();
+                      onRemove(rel.id);
+                    }}
+                  />
+                )}
                 <CrowFoot x={a.x} y={a.y} dir={a.dir} card={rel.fromCard} color={color} active={isActive} />
                 <CrowFoot x={b.x} y={b.y} dir={b.dir} card={rel.toCard} color={color} active={isActive} />
                 {(showLabels || isActive) && (
@@ -320,6 +514,36 @@ export default function Diagram({
               </g>
             );
           })}
+
+          {/* ---------- preview of the connector being dragged ---------- */}
+          {linkDrag && (
+            <g pointerEvents="none">
+              {(() => {
+                const from = tables.find((t) => t.name === linkDrag.srcTable);
+                const fr = rects.get(linkDrag.srcTable);
+                if (!from || !fr) return null;
+                const srcY = fr.y + rowCenterY(linkDrag.srcIndex);
+                const dir = linkDrag.srcSide === 'out' ? 1 : -1;
+                const a = { x: fr.x + (dir === 1 ? fr.w : 0), y: srcY, dir: dir as 1 | -1 };
+                const b = { x: linkDrag.cursor.x, y: linkDrag.cursor.y, dir: 1 as const };
+                const preview = buildConnector(connector, a, b, fr, fr, false);
+                return (
+                  <>
+                    <path
+                      d={preview.d}
+                      fill="none"
+                      stroke="#38bdf8"
+                      strokeWidth={2}
+                      strokeDasharray="7 5"
+                      strokeLinecap="round"
+                    />
+                    <circle cx={linkDrag.cursor.x} cy={linkDrag.cursor.y} r={5} fill="none" stroke="#38bdf8" strokeWidth={1.6} />
+                    <circle cx={linkDrag.cursor.x} cy={linkDrag.cursor.y} r={2} fill="#38bdf8" />
+                  </>
+                );
+              })()}
+            </g>
+          )}
 
           {/* ---------- tables ---------- */}
           {tables.map((table) => {
@@ -355,9 +579,9 @@ export default function Diagram({
                   onSelect(table.name);
                   const p = toDiagram(e.clientX, e.clientY);
                   dragRef.current = { mode: 'table', name: table.name, dx: p.x - r.x, dy: p.y - r.y };
+                  setDraggingTable(true);
                   (e.target as Element).setPointerCapture(e.pointerId);
                 }}
-                style={{ cursor: dragRef.current?.mode === 'table' ? 'grabbing' : 'grab' }}
               >
                 <rect
                   x={r.x}
@@ -437,6 +661,62 @@ export default function Diagram({
                       >
                         {col.type}
                       </text>
+
+                      {/* alças de conexão: arraste para ligar a outra tabela */}
+                      {(!hoverTable || hoverTable === table.name) && (
+                        <g
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            onSelect(table.name);
+                            const p = toDiagram(e.clientX, e.clientY);
+                            dragRef.current = {
+                              mode: 'link',
+                              drag: {
+                                srcTable: table.name,
+                                srcCol: col.name,
+                                srcIndex: i,
+                                srcSide: 'out',
+                                cursor: p,
+                              },
+                            };
+                            setLinkDrag(dragRef.current.mode === 'link' ? dragRef.current.drag : null);
+                            (e.target as Element).setPointerCapture(e.pointerId);
+                          }}
+                        >
+                          <rect
+                            x={r.x + r.w - 8}
+                            y={y}
+                            width={14}
+                            height={ROW_H}
+                            fill="transparent"
+                            style={{ cursor: 'crosshair' }}
+                          />
+                          <circle
+                            cx={r.x + r.w}
+                            cy={y + ROW_H / 2}
+                            r={3.4}
+                            fill="#0b1220"
+                            stroke={col.pk || col.unique ? '#4ade80' : '#38bdf8'}
+                            strokeWidth={1.4}
+                          />
+                          <rect
+                            x={r.x - 6}
+                            y={y}
+                            width={14}
+                            height={ROW_H}
+                            fill="transparent"
+                            style={{ cursor: 'crosshair' }}
+                          />
+                          <circle
+                            cx={r.x}
+                            cy={y + ROW_H / 2}
+                            r={3.4}
+                            fill="#0b1220"
+                            stroke={col.pk || col.unique ? '#4ade80' : '#38bdf8'}
+                            strokeWidth={1.4}
+                          />
+                        </g>
+                      )}
                     </g>
                   );
                 })}
