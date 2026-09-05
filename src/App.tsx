@@ -6,7 +6,7 @@ import ExportModal from './components/ExportModal';
 import HelpModal from './components/HelpModal';
 import { parseSchema } from './lib/parser';
 import { autoLayout, contentBounds, placeNewTables, tableRect } from './lib/geometry';
-import { exportPng, exportSvg } from './lib/export';
+import { downloadBlob, exportPng, exportSvg } from './lib/export';
 import {
   createVisualConnection,
   createVisualTable,
@@ -60,6 +60,7 @@ export default function App() {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const splitRef = useRef<HTMLDivElement>(null);
   const diagramRef = useRef<DiagramHandle | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const namePromptInput = useRef<HTMLInputElement | null>(null);
 
@@ -244,6 +245,47 @@ export default function App() {
     flash('SVG exportado');
   };
 
+  const handleExportProject = () => {
+    const project = {
+      version: 1,
+      text,
+      positions,
+      opts,
+    };
+    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+    downloadBlob(blob, 'quickdbd-projeto.json');
+    flash('Projeto exportado (layout mantido!)');
+  };
+
+  const handleImportProject = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = JSON.parse(evt.target?.result as string);
+        if (data && typeof data.text === 'string') {
+          setText(data.text);
+          if (data.positions && typeof data.positions === 'object') {
+            setPositions(data.positions);
+          }
+          if (data.opts && typeof data.opts === 'object') {
+            setOpts((prev) => ({ ...prev, ...data.opts }));
+          }
+          setSelected(null);
+          setTimeout(() => setFitTick((t) => t + 1), 60);
+          flash('Projeto importado (layout restaurado!)');
+        } else {
+          alert('Formato de projeto inválido.');
+        }
+      } catch {
+        alert('Falha ao ler o arquivo JSON do projeto.');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // reset
+  };
+
   /* ---------- resizable split ---------- */
   const startSplitDrag = (e: React.PointerEvent) => {
     e.preventDefault();
@@ -348,6 +390,28 @@ export default function App() {
         </span>
 
         <div className="ml-auto flex items-center gap-2">
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleImportProject}
+            accept=".json"
+            style={{ display: 'none' }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
+            title="Importar um arquivo JSON de projeto com todo o layout preservado"
+          >
+            📂 Importar Projeto
+          </button>
+          <button
+            onClick={handleExportProject}
+            className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
+            title="Salvar o projeto em um arquivo JSON com todo o layout preservado"
+          >
+            💾 Salvar Projeto
+          </button>
+          <div className="h-4 w-px bg-slate-800" />
           <button
             onClick={() => setShowHelp(true)}
             className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
@@ -357,12 +421,14 @@ export default function App() {
           <button
             onClick={handleExportSvg}
             className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
+            title="Exportar diagrama como SVG mantendo o layout atual"
           >
             SVG
           </button>
           <button
             onClick={handleExportPng}
             className="rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
+            title="Exportar diagrama como PNG mantendo o layout atual"
           >
             PNG
           </button>
