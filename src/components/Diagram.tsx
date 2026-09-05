@@ -46,9 +46,13 @@ type LinkDrag = {
   srcTable: string;
   srcCol: string;
   srcIndex: number;
-  srcSide: 'out' | 'in';
+  start: Point;
   cursor: Point;
 };
+
+type LinkTarget =
+  | { kind: 'column'; table: string; col: string }
+  | { kind: 'connector'; rel: Relationship };
 
 type DragState =
   | { mode: 'pan'; startX: number; startY: number; ox: number; oy: number }
@@ -157,7 +161,7 @@ export default function Diagram({
   const [hoverTable, setHoverTable] = useState<string | null>(null);
   const [hoverRel, setHoverRel] = useState<string | null>(null);
   const [linkDrag, setLinkDrag] = useState<LinkDrag | null>(null);
-  const [linkHit, setLinkHit] = useState<string | null>(null);
+  const [linkTarget, setLinkTarget] = useState<LinkTarget | null>(null);
   const [draggingTable, setDraggingTable] = useState(false);
   const dragRef = useRef<DragState | null>(null);
 
@@ -220,7 +224,7 @@ export default function Diagram({
       return;
     }
     setLinkDrag((d) => (d ? { ...d, cursor: p } : d));
-    setLinkHit(hitTest(p.x, p.y)?.id ?? null);
+    setLinkTarget(hitTarget(p.x, p.y));
   };
 
   const endDrag = (e: React.PointerEvent) => {
@@ -230,27 +234,30 @@ export default function Diagram({
     const el = e.target as Element;
     if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
     if (drag?.mode === 'link') {
-      const p = toDiagram(e.clientX, e.clientY);
       const { drag: d } = drag;
-      const hit = hitTest(p.x, p.y);
-      // soltar sobre outra conexão: a conexão alvo é removida
-      if (hit) {
-        const isOwn =
-          (hit.fromTable === d.srcTable && hit.fromColumn === d.srcCol) ||
-          (hit.toTable === d.srcTable && hit.toColumn === d.srcCol);
-        if (isOwn) {
-          setLinkDrag(null);
-          setLinkHit(null);
-          return;
+      const p = toDiagram(e.clientX, e.clientY);
+      const target = hitTarget(p.x, p.y);
+      // se não moveu quase nada, trata como simples clique na alça: faz nada
+      const moved = Math.hypot(p.x - d.start.x, p.y - d.start.y);
+      if (moved > 4 && target) {
+        const sameColumn =
+          target.kind === 'column' &&
+          target.table === d.srcTable &&
+          target.col === d.srcCol;
+        const ownConnector =
+          target.kind === 'connector' &&
+          ((target.rel.fromTable === d.srcTable && target.rel.fromColumn === d.srcCol) ||
+            (target.rel.toTable === d.srcTable && target.rel.toColumn === d.srcCol));
+        if (target.kind === 'column' && !sameColumn) {
+          // soltou sobre uma coluna: CRIA a conexão
+          onLink(d.srcTable, d.srcCol, target.table, target.col);
+        } else if (target.kind === 'connector' && !ownConnector) {
+          // soltou sobre outra conexão: REMOVE a conexão alvo
+          onRemove(target.rel.id);
         }
-        // arrastou a alça de uma coluna: se não foi um clique simples, o alvo é removido
-        const moved = Math.hypot(p.x - d.cursor.x, p.y - d.cursor.y);
-        if (moved > 10) onRemove(hit.id);
-        else onLink(d.srcTable, d.srcCol, hit.toTable, hit.toColumn);
-        setLinkDrag(null);
-        setLinkHit(null);
       }
       setLinkDrag(null);
+      setLinkTarget(null);
     }
   };
 
@@ -308,32 +315,62 @@ export default function Diagram({
     }[];
   }, [relationships, tables, rects, connector, colorful]);
 
-  const hitTest = useCallback(
-    (x: number, y: number): Relationship | null => {
+  /** O que está sob o ponteiro: primeiro a coluna (mais perto do mouse), depois a conexão. */
+  const hitTarget = useCallback(
+    (x: number, y: number): LinkTarget | null => {
       const p = { x, y };
-      let best: Relationship | null = null;
-      let bestDist = 8;
-      for (const c of connectors) {
-        const d = Math.min(pathDist(p, c.path.d), Math.hypot(p.x - c.path.label.x, p.y - c.path.label.y) - 12);
-        if (d < bestDist) {
-          bestDist = d;
-          best = c.rel;
+      const margin = 6 / viewRef.current.k;
+      let bestCol: { table: string; col: string; d: number } | null = null;
+      for (const t of tables) {
+        const r = rects.get(t.name);
+        if (!r) continue;
+        const dx =
+          p.x < r.x ? r.x - p.x : p.x > r.x + r.w ? p.x - (r.x + r.w) : 0;
+        const dy =
+          p.y < r.y ? r.y - p.y : p.y > r.y + r.h ? p.y - (r.y + r.h) : 0;
+        const d = Math.hypot(dx, dy);
+        if (d <= margin && (!bestCol || d < bestCol.d)) {
+          let bestInTable: string | null = null;
+          let bestInTableD = Infinity;
+          for (let i = 0; i < t.columns.length; i++) {
+            const cy = r.y + rowCenterY(i);
+            const dd = Math.abs(p.y - cy);
+            if (dd < bestInTableD) {
+              bestInTableD = dd;
+              bestInTable = t.columns[i].name;
+            }
+          }
+          if (bestInTable) bestCol = { table: t.name, col: bestInTable, d };
         }
       }
-      return best;
+      if (bestCol) return { kind: 'column', table: bestCol.table, col: bestCol.col };
+      let bestRel: LinkTarget | null = null;
+      let bestRelD = 10;
+      for (const c of connectors) {
+        const d = Math.min(
+          pathDist(p, c.path.d),
+          Math.hypot(p.x - c.path.label.x, p.y - c.path.label.y) - 12,
+        );
+        if (d < bestRelD) {
+          bestRelD = d;
+          bestRel = { kind: 'connector', rel: c.rel };
+        }
+      }
+      return bestRel;
     },
-    [connectors],
+    [tables, rects, connectors],
   );
 
+  const linkTargetValid = !!linkDrag && !!linkTarget &&
+    (linkTarget.kind === 'column'
+      ? !(linkTarget.table === linkDrag.srcTable && linkTarget.col === linkDrag.srcCol)
+      : !((linkTarget.rel.fromTable === linkDrag.srcTable && linkTarget.rel.fromColumn === linkDrag.srcCol) ||
+          (linkTarget.rel.toTable === linkDrag.srcTable && linkTarget.rel.toColumn === linkDrag.srcCol)));
+
   const cursor = linkDrag
-    ? linkHit &&
-        !(
-          (linkHit.startsWith(`${linkDrag.srcTable}.`) &&
-            linkHit.includes(`.${linkDrag.srcCol}->`)) ||
-          linkHit.endsWith(`.${linkDrag.srcTable}.${linkDrag.srcCol}`)
-        )
-      ? 'not-allowed'
-      : 'crosshair'
+    ? linkTargetValid
+      ? 'crosshair'
+      : 'not-allowed'
     : hoverRel
       ? 'pointer'
       : draggingTable
@@ -397,14 +434,13 @@ export default function Diagram({
         <g id="dbd-viewport" transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
           {/* ---------- connectors ---------- */}
           {connectors.map(({ rel, a, b, path, color }) => {
+            const isLinkHit = linkTarget?.kind === 'connector' && linkTarget.rel.id === rel.id;
             const isActive =
               hoverRel === rel.id ||
-              linkHit === rel.id ||
+              isLinkHit ||
               (!!activeTable && (rel.fromTable === activeTable || rel.toTable === activeTable));
             const dimmed =
-              (!!activeTable || !!hoverRel || !!linkDrag) &&
-              !isActive &&
-              !(linkHit === rel.id);
+              (!!activeTable || !!hoverRel || !!linkDrag) && !isActive;
             return (
               <g
                 key={rel.id}
@@ -449,13 +485,13 @@ export default function Diagram({
                       fontFamily={MONO}
                       fill="#fda4af"
                     >
-                      {linkHit === rel.id ? 'solte p/ remover' : 'remover'}
+                      {isLinkHit ? 'solte p/ remover' : 'remover'}
                     </text>
                   </g>
                 )}
                 {/* halo makes crossings readable */}
                 <path d={path.d} fill="none" stroke="#0b1220" strokeWidth={isActive ? 9 : 7} strokeLinecap="round" />
-                {linkHit === rel.id && (
+                {isLinkHit && (
                   <path
                     d={path.d}
                     fill="none"
@@ -468,7 +504,7 @@ export default function Diagram({
                 <path
                   d={path.d}
                   fill="none"
-                  stroke={linkHit === rel.id ? '#f43f5e' : color}
+                  stroke={isLinkHit ? '#f43f5e' : color}
                   strokeWidth={isActive ? 2.8 : 1.8}
                   strokeLinecap="round"
                 />
@@ -519,26 +555,41 @@ export default function Diagram({
           {linkDrag && (
             <g pointerEvents="none">
               {(() => {
-                const from = tables.find((t) => t.name === linkDrag.srcTable);
                 const fr = rects.get(linkDrag.srcTable);
-                if (!from || !fr) return null;
+                if (!fr) return null;
                 const srcY = fr.y + rowCenterY(linkDrag.srcIndex);
-                const dir = linkDrag.srcSide === 'out' ? 1 : -1;
-                const a = { x: fr.x + (dir === 1 ? fr.w : 0), y: srcY, dir: dir as 1 | -1 };
+                const dir: 1 | -1 = linkDrag.cursor.x >= fr.x + fr.w / 2 ? 1 : -1;
+                const a = { x: fr.x + (dir === 1 ? fr.w : 0), y: srcY, dir };
                 const b = { x: linkDrag.cursor.x, y: linkDrag.cursor.y, dir: 1 as const };
                 const preview = buildConnector(connector, a, b, fr, fr, false);
+                const ok = linkTargetValid;
+                const color = ok ? '#38bdf8' : '#64748b';
                 return (
                   <>
                     <path
                       d={preview.d}
                       fill="none"
-                      stroke="#38bdf8"
+                      stroke={color}
                       strokeWidth={2}
                       strokeDasharray="7 5"
                       strokeLinecap="round"
                     />
-                    <circle cx={linkDrag.cursor.x} cy={linkDrag.cursor.y} r={5} fill="none" stroke="#38bdf8" strokeWidth={1.6} />
-                    <circle cx={linkDrag.cursor.x} cy={linkDrag.cursor.y} r={2} fill="#38bdf8" />
+                    <circle cx={linkDrag.cursor.x} cy={linkDrag.cursor.y} r={5} fill="none" stroke={color} strokeWidth={1.6} />
+                    <circle cx={linkDrag.cursor.x} cy={linkDrag.cursor.y} r={2} fill={color} />
+                    {linkTarget?.kind === 'column' && ok && (
+                      <rect
+                        x={rects.get(linkTarget.table)?.x ?? fr.x}
+                        y={rects.get(linkTarget.table)?.y ?? fr.y}
+                        width={rects.get(linkTarget.table)?.w ?? fr.w}
+                        height={rects.get(linkTarget.table)?.h ?? fr.h}
+                        rx={10}
+                        fill="none"
+                        stroke="#38bdf8"
+                        strokeWidth={2}
+                        strokeDasharray="5 4"
+                        opacity={0.9}
+                      />
+                    )}
                   </>
                 );
               })()}
@@ -662,31 +713,30 @@ export default function Diagram({
                         {col.type}
                       </text>
 
-                      {/* alças de conexão: arraste para ligar a outra tabela */}
+                      {/* alça de conexão: arraste até uma coluna de outra tabela para ligar;
+                          arraste até outra linha de conexão para removê-la */}
                       {(!hoverTable || hoverTable === table.name) && (
                         <g
                           onPointerDown={(e) => {
                             e.stopPropagation();
                             onSelect(table.name);
                             const p = toDiagram(e.clientX, e.clientY);
-                            dragRef.current = {
-                              mode: 'link',
-                              drag: {
-                                srcTable: table.name,
-                                srcCol: col.name,
-                                srcIndex: i,
-                                srcSide: 'out',
-                                cursor: p,
-                              },
+                            const link: LinkDrag = {
+                              srcTable: table.name,
+                              srcCol: col.name,
+                              srcIndex: i,
+                              start: p,
+                              cursor: p,
                             };
-                            setLinkDrag(dragRef.current.mode === 'link' ? dragRef.current.drag : null);
+                            dragRef.current = { mode: 'link', drag: link };
+                            setLinkDrag(link);
                             (e.target as Element).setPointerCapture(e.pointerId);
                           }}
                         >
                           <rect
-                            x={r.x + r.w - 8}
+                            x={r.x + r.w - 12}
                             y={y}
-                            width={14}
+                            width={20}
                             height={ROW_H}
                             fill="transparent"
                             style={{ cursor: 'crosshair' }}
@@ -694,26 +744,10 @@ export default function Diagram({
                           <circle
                             cx={r.x + r.w}
                             cy={y + ROW_H / 2}
-                            r={3.4}
+                            r={3.6}
                             fill="#0b1220"
                             stroke={col.pk || col.unique ? '#4ade80' : '#38bdf8'}
-                            strokeWidth={1.4}
-                          />
-                          <rect
-                            x={r.x - 6}
-                            y={y}
-                            width={14}
-                            height={ROW_H}
-                            fill="transparent"
-                            style={{ cursor: 'crosshair' }}
-                          />
-                          <circle
-                            cx={r.x}
-                            cy={y + ROW_H / 2}
-                            r={3.4}
-                            fill="#0b1220"
-                            stroke={col.pk || col.unique ? '#4ade80' : '#38bdf8'}
-                            strokeWidth={1.4}
+                            strokeWidth={1.5}
                           />
                         </g>
                       )}
