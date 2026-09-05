@@ -74,16 +74,15 @@ export interface Point {
 export type ConnectorStyle = 'orthogonal' | 'curved' | 'straight';
 
 /**
- * Área desenhada no canvas. A participação das tabelas é espacial: pertence ao
- * grupo toda tabela cujo centro está dentro do retângulo.
+ * Grupo de tabelas. A participação é explícita (lista de tabelas), mas o usuário
+ * pode arrastar tabelas para dentro/fora do frame para entrar/sair. O retângulo
+ * é derivado automaticamente dos membros (auto-envolve), então nunca "quebra".
  */
 export interface TableGroup {
   id: string;
   name: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+  /** tabelas que pertencem ao grupo (fonte da verdade) */
+  members: string[];
   /** índice na paleta de cores de grupo */
   color: number;
 }

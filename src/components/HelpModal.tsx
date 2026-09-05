@@ -98,17 +98,17 @@ created_at datetime`}</pre>
               <li>
                 <strong className="text-slate-100">Criar:</strong> segure{' '}
                 <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">Ctrl</kbd>/
-                <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">⌘</kbd> e arraste numa
-                área vazia — como desenhar um retângulo.
+                <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">⌘</kbd> e arraste sobre as
+                tabelas que quer agrupar. As tabelas dentro do retângulo entram no grupo.
               </li>
               <li>
-                <strong className="text-slate-100">Participação é espacial:</strong> arraste uma tabela para dentro da
-                área e ela entra no grupo; arraste para fora e ela sai. Sem menus.
+                <strong className="text-slate-100">Entrar/sair:</strong> arraste uma tabela para dentro da área e ela
+                entra; para fora e ela sai. A área se ajusta sozinha ao conteúdo.
               </li>
-              <li>Arraste o título ou o interior da área para mover o grupo com todas as tabelas dentro.</li>
-              <li>Use os 8 quadradinhos nas bordas para redimensionar a área.</li>
-              <li>Duplo-clique no título renomeia. O ✕ apaga só a área (as tabelas ficam).</li>
-              <li>No painel “▦ Grupos”: ⤢ ajusta a área ao conteúdo e o círculo colorido troca a cor.</li>
+              <li>Arraste o título ou o interior da área para mover o grupo inteiro com as tabelas.</li>
+              <li>Duplo-clique no título renomeia. O ✕ (no modo edição) apaga só a área — as tabelas ficam.</li>
+              <li><strong className="text-slate-100">Auto layout</strong> reorganiza mantendo cada grupo agrupado.</li>
+              <li>No painel “▦ Grupos”: o círculo colorido troca a cor; ○/◉ seleciona.</li>
               <li>Grupos entram no “Salvar Projeto” e são restaurados ao importar.</li>
             </ul>
           </section>

@@ -30,19 +30,11 @@ import {
 } from '../lib/geometry';
 import { resolveVisualConnection } from '../lib/visualRelations';
 import {
-  applyResize,
+  groupBox,
   groupColor,
   GROUP_HEADER_H,
-  groupOfTable,
-  handlePoints,
-  HANDLE_SIZE,
-  MIN_GROUP_H,
-  MIN_GROUP_W,
   rectFromDrag,
-  RESIZE_CURSOR,
   sortedForPaint,
-  tablesInGroup,
-  type ResizeEdge,
 } from '../lib/groups';
 
 const PALETTE = [
@@ -76,16 +68,19 @@ interface Props {
   svgRef: React.RefObject<SVGSVGElement | null>;
   diagramRef?: React.Ref<DiagramHandle>;
   groups?: TableGroup[];
+  groupAnchors?: Record<string, Point>;
   selectedGroup?: string | null;
   onSelectGroup?: (id: string | null) => void;
-  onGroupDragStart?: (id: string, members: string[]) => void;
-  onGroupDragEnd?: () => void;
-  /** Move o frame e as tabelas capturadas no início do arrasto. */
-  onDragGroup?: (id: string, delta: Point, members: string[]) => void;
-  onResizeGroup?: (id: string, rect: { x: number; y: number; w: number; h: number }) => void;
-  onCreateGroup?: (rect: { x: number; y: number; w: number; h: number }) => void;
+  /** Move todos os membros do grupo por um delta absoluto (start + delta). */
+  onGroupMoveStart?: (id: string) => void;
+  onGroupMove?: (id: string, delta: Point) => void;
+  onGroupMoveEnd?: () => void;
+  /** Cria grupo a partir de um retângulo; captura tabelas cujo centro caiu dentro. */
+  onCreateGroup?: (rect: Rect) => void;
   onRenameGroup?: (id: string, name: string) => void;
   onDeleteGroup?: (id: string) => void;
+  /** Chamado ao soltar uma tabela: reavalia em qual grupo ela deve ficar. */
+  onTableDropped?: (name: string) => void;
 }
 
 type LinkDrag = {
@@ -99,16 +94,9 @@ type LinkDrag = {
 
 type DragState = { pointerId: number } & (
   | { mode: 'pan'; startX: number; startY: number; ox: number; oy: number }
-  | { mode: 'table'; name: string; dx: number; dy: number }
+  | { mode: 'table'; name: string; dx: number; dy: number; moved: boolean }
   | { mode: 'link'; drag: LinkDrag }
-  | {
-      mode: 'groupMove';
-      id: string;
-      start: Point;
-      origin: { x: number; y: number };
-      members: { name: string; x: number; y: number }[];
-    }
-  | { mode: 'groupResize'; id: string; edge: ResizeEdge; start: Point; original: Rect }
+  | { mode: 'groupMove'; id: string; start: Point }
   | { mode: 'groupDraw'; start: Point }
 );
 
@@ -168,15 +156,16 @@ export default function Diagram({
   svgRef,
   diagramRef,
   groups = [],
+  groupAnchors = {},
   selectedGroup = null,
   onSelectGroup,
-  onGroupDragStart,
-  onGroupDragEnd,
-  onDragGroup,
-  onResizeGroup,
+  onGroupMoveStart,
+  onGroupMove,
+  onGroupMoveEnd,
   onCreateGroup,
   onRenameGroup,
   onDeleteGroup,
+  onTableDropped,
 }: Props) {
   useImperativeHandle(
     diagramRef,
@@ -220,22 +209,18 @@ export default function Diagram({
     return map;
   }, [tables, positions]);
 
-  /** Membership é espacial: nome das tabelas contidas em cada frame. */
-  const groupMembers = useMemo(() => {
-    const map = new Map<string, string[]>();
-    for (const g of groups) map.set(g.id, tablesInGroup(g, tables, positions));
-    return map;
-  }, [groups, tables, positions]);
+  /** Frames derivados dos membros (auto-envolvem as tabelas). */
+  const groupBoxes = useMemo(
+    () => groups.map((g) => groupBox(g, tables, positions, groupAnchors)),
+    [groups, tables, positions, groupAnchors],
+  );
 
-  /** Grupo que contém cada tabela (o menor, quando houver aninhamento). */
+  /** Grupo (menor) ao qual cada tabela pertence, para pintar o pontinho. */
   const tableGroupOf = useMemo(() => {
     const map = new Map<string, TableGroup>();
-    for (const t of tables) {
-      const g = groupOfTable(t.name, groups, tables, positions);
-      if (g) map.set(t.name, g);
-    }
+    for (const g of groups) for (const n of g.members) if (!map.has(n)) map.set(n, g);
     return map;
-  }, [groups, tables, positions]);
+  }, [groups]);
 
   const toDiagram = useCallback(
     (clientX: number, clientY: number) => {
@@ -339,21 +324,15 @@ export default function Diagram({
     }
     if (drag.mode === 'groupMove') {
       const snap = e.altKey ? 1 : 5;
-      const dx = Math.round((p.x - drag.start.x) / snap) * snap;
-      const dy = Math.round((p.y - drag.start.y) / snap) * snap;
-      onDragGroup?.(drag.id, { x: dx, y: dy }, drag.members.map((m) => m.name));
-      return;
-    }
-    if (drag.mode === 'groupResize') {
-      const rect = applyResize(drag.original, drag.edge, {
-        x: p.x - drag.start.x,
-        y: p.y - drag.start.y,
+      onGroupMove?.(drag.id, {
+        x: Math.round((p.x - drag.start.x) / snap) * snap,
+        y: Math.round((p.y - drag.start.y) / snap) * snap,
       });
-      onResizeGroup?.(drag.id, rect);
       return;
     }
     if (drag.mode === 'table') {
       const snap = e.altKey ? 1 : 5;
+      drag.moved = true;
       onMove(drag.name, {
         x: Math.round((p.x - drag.dx) / snap) * snap,
         y: Math.round((p.y - drag.dy) / snap) * snap,
@@ -371,19 +350,19 @@ export default function Diagram({
     if (drag.mode === 'groupDraw') {
       const rect = drawRect;
       cancelDrag();
-      if (rect && rect.w >= MIN_GROUP_W / 2 && rect.h >= MIN_GROUP_H / 2) {
-        onCreateGroup?.({
-          x: rect.x,
-          y: rect.y,
-          w: Math.max(rect.w, MIN_GROUP_W),
-          h: Math.max(rect.h, MIN_GROUP_H),
-        });
-      }
+      if (rect && rect.w >= 30 && rect.h >= 30) onCreateGroup?.(rect);
       return;
     }
-    if (drag.mode === 'groupMove' || drag.mode === 'groupResize') {
+    if (drag.mode === 'groupMove') {
       cancelDrag();
-      onGroupDragEnd?.();
+      onGroupMoveEnd?.();
+      return;
+    }
+    if (drag.mode === 'table') {
+      const wasMoved = drag.moved;
+      const name = drag.name;
+      cancelDrag();
+      if (wasMoved) onTableDropped?.(name); // reavalia participação em grupos
       return;
     }
 
@@ -564,82 +543,68 @@ export default function Diagram({
         <rect width="100%" height="100%" fill="url(#dbd-grid)" pointerEvents="none" />
 
         <g id="dbd-viewport" transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
-          {/* ---------- table groups: spatial frames behind everything ---------- */}
-          {sortedForPaint(groups).map((group) => {
+          {/* ---------- table groups: frames derived from their members ---------- */}
+          {sortedForPaint(groupBoxes).map((box) => {
+            const group = box.group;
             const c = groupColor(group.color);
-            const members = groupMembers.get(group.id) ?? [];
             const isSel = selectedGroup === group.id;
             const isRenaming = renamingGroup === group.id;
-            const holdsDragged =
-              !!linkDrag && members.includes(linkDrag.srcTable);
-            const nameW = Math.max(group.name.length * 6.6 + 46, 92);
+            const holdsDragged = !!linkDrag && group.members.includes(linkDrag.srcTable);
+            const empty = box.memberNames.length === 0;
+            const nameW = Math.max(group.name.length * 6.6 + 52, 108);
+            const midY = group.members.length ? box.y - GROUP_HEADER_H / 2 : box.y + GROUP_HEADER_H / 2;
+            const chipY = group.members.length ? box.y - GROUP_HEADER_H : box.y;
+
+            const startMove = (e: React.PointerEvent) => {
+              if (e.button !== 0 || dragRef.current || linkDrag) return;
+              e.stopPropagation();
+              onSelectGroup?.(group.id);
+              onSelect(null);
+              if (!editMode) return; // fora do modo edição, só seleciona
+              e.preventDefault();
+              const pt = toDiagram(e.clientX, e.clientY);
+              dragRef.current = { mode: 'groupMove', id: group.id, start: pt, pointerId: e.pointerId };
+              onGroupMoveStart?.(group.id);
+              svgRef.current?.setPointerCapture(e.pointerId);
+            };
+
             return (
               <g key={group.id} pointerEvents={linkDrag ? 'none' : undefined}>
-                {/* frame body: clicking it selects, dragging moves everything inside */}
+                {/* body */}
                 <rect
-                  x={group.x}
-                  y={group.y}
-                  width={group.w}
-                  height={group.h}
+                  x={box.x}
+                  y={box.y}
+                  width={box.w}
+                  height={box.h}
                   rx={16}
                   fill={c.fill}
-                  fillOpacity={isSel ? 0.1 : holdsDragged ? 0.12 : 0.055}
+                  fillOpacity={holdsDragged ? 0.14 : isSel ? 0.1 : 0.05}
                   stroke={c.stroke}
-                  strokeOpacity={isSel ? 0.95 : 0.45}
+                  strokeOpacity={isSel ? 0.95 : 0.4}
                   strokeWidth={isSel ? 2 : 1.4}
-                  strokeDasharray={isSel ? undefined : '8 6'}
-                  style={{ cursor: editMode ? 'move' : 'default' }}
-                  onPointerDown={(e) => {
-                    if (e.button !== 0 || dragRef.current || linkDrag) return;
-                    e.stopPropagation();
-                    onSelectGroup?.(group.id);
-                    onSelect(null);
-                    if (!editMode) return; // fora do modo edição só seleciona
-                    e.preventDefault();
-                    const p = toDiagram(e.clientX, e.clientY);
-                    dragRef.current = {
-                      mode: 'groupMove',
-                      id: group.id,
-                      start: p,
-                      origin: { x: group.x, y: group.y },
-                      members: members.map((n) => ({
-                        name: n,
-                        x: positions[n]?.x ?? 0,
-                        y: positions[n]?.y ?? 0,
-                      })),
-                      pointerId: e.pointerId,
-                    };
-                    onGroupDragStart?.(group.id, members);
-                    svgRef.current?.setPointerCapture(e.pointerId);
-                  }}
+                  strokeDasharray={empty ? '4 5' : isSel ? undefined : '9 7'}
+                  style={{ cursor: editMode ? 'move' : 'pointer' }}
+                  onPointerDown={startMove}
                 />
+                {empty && (
+                  <text
+                    x={box.x + box.w / 2}
+                    y={box.y + box.h / 2 + 4}
+                    textAnchor="middle"
+                    fontSize={11}
+                    fontFamily={MONO}
+                    fill={c.stroke}
+                    fillOpacity={0.6}
+                    pointerEvents="none"
+                  >
+                    arraste tabelas para cá
+                  </text>
+                )}
 
                 {/* title chip */}
                 <g
                   style={{ cursor: editMode ? 'move' : 'pointer' }}
-                  onPointerDown={(e) => {
-                    if (e.button !== 0 || dragRef.current || linkDrag) return;
-                    e.stopPropagation();
-                    onSelectGroup?.(group.id);
-                    onSelect(null);
-                    if (!editMode) return;
-                    e.preventDefault();
-                    const p = toDiagram(e.clientX, e.clientY);
-                    dragRef.current = {
-                      mode: 'groupMove',
-                      id: group.id,
-                      start: p,
-                      origin: { x: group.x, y: group.y },
-                      members: members.map((n) => ({
-                        name: n,
-                        x: positions[n]?.x ?? 0,
-                        y: positions[n]?.y ?? 0,
-                      })),
-                      pointerId: e.pointerId,
-                    };
-                    onGroupDragStart?.(group.id, members);
-                    svgRef.current?.setPointerCapture(e.pointerId);
-                  }}
+                  onPointerDown={startMove}
                   onDoubleClick={(e) => {
                     if (!editMode) return;
                     e.stopPropagation();
@@ -647,21 +612,21 @@ export default function Diagram({
                   }}
                 >
                   <rect
-                    x={group.x}
-                    y={group.y - GROUP_HEADER_H}
+                    x={box.x}
+                    y={chipY}
                     width={nameW}
                     height={GROUP_HEADER_H}
                     rx={9}
                     fill={c.chip}
-                    fillOpacity={isSel ? 1 : 0.9}
+                    fillOpacity={isSel ? 1 : 0.92}
                     stroke={c.stroke}
                     strokeOpacity={isSel ? 0.9 : 0.4}
                     strokeWidth={1.2}
                   />
-                  <circle cx={group.x + 14} cy={group.y - GROUP_HEADER_H / 2} r={4} fill={c.stroke} />
+                  <circle cx={box.x + 14} cy={midY} r={4} fill={c.stroke} />
                   <text
-                    x={group.x + 25}
-                    y={group.y - GROUP_HEADER_H / 2 + 4}
+                    x={box.x + 25}
+                    y={midY + 4}
                     fontSize={11}
                     fontWeight={700}
                     fontFamily={MONO}
@@ -671,57 +636,26 @@ export default function Diagram({
                     {group.name}
                   </text>
                   <text
-                    x={group.x + nameW - 10}
-                    y={group.y - GROUP_HEADER_H / 2 + 4}
+                    x={box.x + nameW - 28}
+                    y={midY + 4}
                     textAnchor="end"
                     fontSize={10}
                     fontFamily={MONO}
                     fill={c.text}
-                    fillOpacity={0.65}
+                    fillOpacity={0.6}
                     pointerEvents="none"
                   >
-                    {members.length}
+                    {box.memberNames.length}
                   </text>
-                </g>
 
-                {/* edit-mode affordances: resize handles + delete */}
-                {editMode && !linkDrag && (
-                  <g data-interactive="true">
-                    {handlePoints(group).map((h) => (
-                      <rect
-                        key={h.edge}
-                        x={h.x - HANDLE_SIZE / 2}
-                        y={h.y - HANDLE_SIZE / 2}
-                        width={HANDLE_SIZE}
-                        height={HANDLE_SIZE}
-                        rx={2}
-                        fill="#0b1220"
-                        stroke={c.stroke}
-                        strokeWidth={1.5}
-                        style={{ cursor: RESIZE_CURSOR[h.edge] }}
-                        onPointerDown={(e) => {
-                          if (e.button !== 0 || dragRef.current) return;
-                          e.preventDefault();
-                          e.stopPropagation();
-                          onSelectGroup?.(group.id);
-                          const p = toDiagram(e.clientX, e.clientY);
-                          dragRef.current = {
-                            mode: 'groupResize',
-                            id: group.id,
-                            edge: h.edge,
-                            start: p,
-                            original: { x: group.x, y: group.y, w: group.w, h: group.h },
-                            pointerId: e.pointerId,
-                          };
-                          svgRef.current?.setPointerCapture(e.pointerId);
-                        }}
-                      />
-                    ))}
+                  {/* delete button lives on the chip, edit mode only */}
+                  {editMode && !linkDrag && (
                     <g
                       role="button"
                       tabIndex={0}
                       aria-label={`Excluir grupo ${group.name}`}
                       style={{ cursor: 'pointer' }}
+                      data-interactive="true"
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={(e) => {
                         e.stopPropagation();
@@ -729,36 +663,21 @@ export default function Diagram({
                       }}
                     >
                       <title>Excluir grupo (as tabelas permanecem)</title>
-                      <circle
-                        cx={group.x + group.w - 13}
-                        cy={group.y - GROUP_HEADER_H / 2}
-                        r={10}
-                        fill="#351821"
-                        stroke="#f43f5e"
-                        strokeWidth={1.3}
-                      />
+                      <circle cx={box.x + nameW - 14} cy={midY} r={8} fill="#351821" stroke="#f43f5e" strokeWidth={1.2} />
                       <path
-                        d={`M ${group.x + group.w - 16} ${group.y - GROUP_HEADER_H / 2 - 3} l 6 6 M ${
-                          group.x + group.w - 10
-                        } ${group.y - GROUP_HEADER_H / 2 - 3} l -6 6`}
+                        d={`M ${box.x + nameW - 17} ${midY - 3} l 6 6 M ${box.x + nameW - 11} ${midY - 3} l -6 6`}
                         stroke="#fda4af"
-                        strokeWidth={1.6}
+                        strokeWidth={1.5}
                         strokeLinecap="round"
                         pointerEvents="none"
                       />
                     </g>
-                  </g>
-                )}
+                  )}
+                </g>
 
                 {/* inline rename */}
                 {isRenaming && (
-                  <foreignObject
-                    x={group.x}
-                    y={group.y - GROUP_HEADER_H}
-                    width={Math.max(nameW, 170)}
-                    height={GROUP_HEADER_H}
-                    data-interactive="true"
-                  >
+                  <foreignObject x={box.x} y={chipY} width={Math.max(nameW, 180)} height={GROUP_HEADER_H} data-interactive="true">
                     <input
                       autoFocus
                       defaultValue={group.name}
@@ -796,7 +715,7 @@ export default function Diagram({
             );
           })}
 
-          {/* live preview while drawing a new group */}
+          {/* preview while drawing a new group */}
           {drawRect && (
             <g pointerEvents="none" data-interactive="true">
               <rect
@@ -811,16 +730,8 @@ export default function Diagram({
                 strokeWidth={1.8}
                 strokeDasharray="8 6"
               />
-              <text
-                x={drawRect.x + 10}
-                y={drawRect.y + 20}
-                fontSize={11}
-                fontFamily={MONO}
-                fill="#7dd3fc"
-              >
-                {drawRect.w >= MIN_GROUP_W / 2 && drawRect.h >= MIN_GROUP_H / 2
-                  ? 'Solte para criar o grupo'
-                  : 'Arraste mais para criar'}
+              <text x={drawRect.x + 10} y={drawRect.y + 20} fontSize={11} fontFamily={MONO} fill="#7dd3fc">
+                {drawRect.w >= 30 && drawRect.h >= 30 ? 'Solte para criar o grupo' : 'Arraste para criar'}
               </text>
             </g>
           )}
@@ -999,7 +910,7 @@ export default function Diagram({
                   onSelect(table.name);
                   onSelectGroup?.(null);
                   const p = toDiagram(e.clientX, e.clientY);
-                  dragRef.current = { mode: 'table', name: table.name, dx: p.x - r.x, dy: p.y - r.y, pointerId: e.pointerId };
+                  dragRef.current = { mode: 'table', name: table.name, dx: p.x - r.x, dy: p.y - r.y, moved: false, pointerId: e.pointerId };
                   setDraggingTable(true);
                   svgRef.current?.setPointerCapture(e.pointerId);
                 }}
