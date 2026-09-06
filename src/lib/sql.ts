@@ -1,4 +1,4 @@
-import type { Relationship, Table } from '../types';
+import type { Relationship, Table, TableGroup } from '../types';
 
 export type Dialect = 'mysql' | 'postgresql' | 'sqlserver' | 'sqlite' | 'oracle';
 
@@ -87,7 +87,7 @@ export function generateSQL(
   tables: Table[],
   relationships: Relationship[],
   dialect: Dialect,
-  opts: { dropIfExists: boolean } = { dropIfExists: false },
+  opts: { dropIfExists: boolean; groups?: TableGroup[] } = { dropIfExists: false },
 ): string {
   if (!tables.length) return '-- Nenhuma tabela definida ainda.';
   const q = (n: string) => quote(n, dialect);
@@ -97,8 +97,20 @@ export function generateSQL(
     '',
   ];
 
+  // Tabelas em ordem de grupo (agrupadas), depois as sem grupo. Mantém a
+  // ordem original dentro de cada bloco.
+  const groups = opts.groups ?? [];
+  const groupOf = new Map<string, TableGroup>();
+  for (const g of groups) for (const m of g.members) if (!groupOf.has(m)) groupOf.set(m, g);
+  const ordered: { table: Table; group: TableGroup | null }[] = [];
+  for (const g of groups) {
+    for (const t of tables) if (groupOf.get(t.name) === g) ordered.push({ table: t, group: g });
+  }
+  for (const t of tables) if (!groupOf.has(t.name)) ordered.push({ table: t, group: null });
+  const orderedTables = ordered.map((o) => o.table);
+
   if (opts.dropIfExists) {
-    for (const t of [...tables].reverse()) {
+    for (const t of [...orderedTables].reverse()) {
       out.push(
         dialect === 'sqlserver'
           ? `DROP TABLE IF EXISTS ${q(t.name)};`
@@ -108,7 +120,17 @@ export function generateSQL(
     out.push('');
   }
 
-  for (const table of tables) {
+  let lastGroup: TableGroup | null | undefined = undefined;
+  for (const { table, group } of ordered) {
+    if (group !== lastGroup) {
+      if (group) {
+        const bar = '='.repeat(Math.max(8, group.name.length + 12));
+        out.push(`-- ${bar}`, `-- Grupo: ${group.name}`, `-- ${bar}`, '');
+      } else if (lastGroup !== undefined) {
+        out.push('-- ============', '-- Sem grupo', '-- ============', '');
+      }
+      lastGroup = group;
+    }
     const defs: string[] = [];
     const pks = table.columns.filter((c) => c.pk);
 
@@ -172,10 +194,24 @@ export function generateSQL(
   return out.join('\n') + '\n';
 }
 
-export function generateMarkdown(tables: Table[], relationships: Relationship[]): string {
+export function generateMarkdown(
+  tables: Table[],
+  relationships: Relationship[],
+  groups: TableGroup[] = [],
+): string {
   const out: string[] = ['# Dicionário de dados', ''];
+  if (groups.length) {
+    out.push('## Grupos', '');
+    for (const g of groups) {
+      out.push(`- **${g.name}**: ${g.members.length ? g.members.map((m) => `\`${m}\``).join(', ') : '_vazio_'}`);
+    }
+    out.push('');
+  }
+  const groupOf = new Map<string, string>();
+  for (const g of groups) for (const m of g.members) if (!groupOf.has(m)) groupOf.set(m, g.name);
   for (const t of tables) {
-    out.push(`## ${t.name}`, '');
+    const gname = groupOf.get(t.name);
+    out.push(`## ${t.name}${gname ? ` <sub>· ${gname}</sub>` : ''}`, '');
     out.push('| Coluna | Tipo | Chave | Nulo | Padrão |');
     out.push('| --- | --- | --- | --- | --- |');
     for (const c of t.columns) {

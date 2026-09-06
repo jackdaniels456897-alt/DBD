@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import type { Relationship, Table } from '../types';
+import type { Relationship, Table, TableGroup } from '../types';
 import { DIALECT_LABELS, generateMarkdown, generateSQL, type Dialect } from '../lib/sql';
 import { downloadText } from '../lib/export';
 
@@ -8,9 +8,10 @@ interface Props {
   onClose: () => void;
   tables: Table[];
   relationships: Relationship[];
+  groups?: TableGroup[];
 }
 
-export default function ExportModal({ open, onClose, tables, relationships }: Props) {
+export default function ExportModal({ open, onClose, tables, relationships, groups = [] }: Props) {
   const [tab, setTab] = useState<'sql' | 'markdown'>('sql');
   const [dialect, setDialect] = useState<Dialect>('mysql');
   const [dropIfExists, setDropIfExists] = useState(false);
@@ -19,9 +20,9 @@ export default function ExportModal({ open, onClose, tables, relationships }: Pr
   const content = useMemo(() => {
     if (!open) return '';
     return tab === 'sql'
-      ? generateSQL(tables, relationships, dialect, { dropIfExists })
-      : generateMarkdown(tables, relationships);
-  }, [open, tab, tables, relationships, dialect, dropIfExists]);
+      ? generateSQL(tables, relationships, dialect, { dropIfExists, groups })
+      : generateMarkdown(tables, relationships, groups);
+  }, [open, tab, tables, relationships, dialect, dropIfExists, groups]);
 
   if (!open) return null;
 

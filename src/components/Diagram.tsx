@@ -79,8 +79,14 @@ interface Props {
   onCreateGroup?: (rect: Rect) => void;
   onRenameGroup?: (id: string, name: string) => void;
   onDeleteGroup?: (id: string) => void;
+  /** Foto dos frames no início do arrasto de uma tabela (testes usam essa versão). */
+  onTableDragStart?: (snapshot: { table: string; boxes: Array<{ group: string; rect: Rect }> }) => void;
   /** Chamado ao soltar uma tabela: reavalia em qual grupo ela deve ficar. */
   onTableDropped?: (name: string) => void;
+  /** Ações explícitas do menu de contexto. */
+  onRemoveFromGroup?: (table: string, groupId: string) => void;
+  onAddToGroup?: (table: string, groupId: string) => void;
+  onCreateGroupWith?: (table: string) => void;
 }
 
 type LinkDrag = {
@@ -166,6 +172,10 @@ export default function Diagram({
   onRenameGroup,
   onDeleteGroup,
   onTableDropped,
+  onTableDragStart,
+  onRemoveFromGroup,
+  onAddToGroup,
+  onCreateGroupWith,
 }: Props) {
   useImperativeHandle(
     diagramRef,
@@ -201,6 +211,12 @@ export default function Diagram({
   const [draggingTable, setDraggingTable] = useState(false);
   const [drawRect, setDrawRect] = useState<Rect | null>(null);
   const [renamingGroup, setRenamingGroup] = useState<string | null>(null);
+  /** Grupo que receberá a tabela sendo arrastada (preview do drop). */
+  const [dropTargetGroup, setDropTargetGroup] = useState<string | null>(null);
+  /** Snapshot local dos frames no início do arrasto de tabela (para o preview). */
+  const dragBoxSnapshot = useRef<Array<{ group: string; rect: Rect }> | null>(null);
+  /** Menu de contexto de tabela: { table, screen } */
+  const [ctxMenu, setCtxMenu] = useState<{ table: string; x: number; y: number } | null>(null);
   const dragRef = useRef<DragState | null>(null);
 
   const rects = useMemo(() => {
@@ -245,6 +261,8 @@ export default function Diagram({
     setLinkTarget(null);
     setDraggingTable(false);
     setDrawRect(null);
+    setDropTargetGroup(null);
+    dragBoxSnapshot.current = null;
     const svg = svgRef.current;
     if (pointerId !== undefined && svg?.hasPointerCapture(pointerId)) {
       svg.releasePointerCapture(pointerId);
@@ -252,10 +270,17 @@ export default function Diagram({
   }, [svgRef]);
 
   useEffect(() => {
+    if (!editMode) setCtxMenu(null);
+  }, [editMode]);
+
+  useEffect(() => {
     const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && dragRef.current) {
-        event.preventDefault();
-        cancelDrag();
+      if (event.key === 'Escape') {
+        if (dragRef.current) {
+          event.preventDefault();
+          cancelDrag();
+        }
+        setCtxMenu(null);
       }
     };
     window.addEventListener('keydown', escape);
@@ -333,10 +358,29 @@ export default function Diagram({
     if (drag.mode === 'table') {
       const snap = e.altKey ? 1 : 5;
       drag.moved = true;
-      onMove(drag.name, {
-        x: Math.round((p.x - drag.dx) / snap) * snap,
-        y: Math.round((p.y - drag.dy) / snap) * snap,
-      });
+      const nx = Math.round((p.x - drag.dx) / snap) * snap;
+      const ny = Math.round((p.y - drag.dy) / snap) * snap;
+      onMove(drag.name, { x: nx, y: ny });
+      // preview: qual grupo receberia a tabela se soltasse agora?
+      const t = tables.find((tt) => tt.name === drag.name);
+      if (t && dragBoxSnapshot.current) {
+        const w = rects.get(drag.name)?.w ?? 200;
+        const h = rects.get(drag.name)?.h ?? 100;
+        const cx = nx + w / 2;
+        const cy = ny + h / 2;
+        let best: string | null = null;
+        let bestArea = Infinity;
+        for (const b of dragBoxSnapshot.current) {
+          if (cx >= b.rect.x && cx <= b.rect.x + b.rect.w && cy >= b.rect.y && cy <= b.rect.y + b.rect.h) {
+            const area = b.rect.w * b.rect.h;
+            if (area < bestArea) {
+              bestArea = area;
+              best = b.group;
+            }
+          }
+        }
+        setDropTargetGroup(best);
+      }
       return;
     }
     setLinkDrag((d) => (d ? { ...d, cursor: p } : d));
@@ -551,6 +595,15 @@ export default function Diagram({
             const isRenaming = renamingGroup === group.id;
             const holdsDragged = !!linkDrag && group.members.includes(linkDrag.srcTable);
             const empty = box.memberNames.length === 0;
+            /** Tabela sendo arrastada vai cair AQUI ao soltar. */
+            const isDropTarget = draggingTable && dropTargetGroup === group.id;
+            /** Tabela sendo arrastada está SAINDO deste grupo. */
+            const isLosing =
+              draggingTable &&
+              dropTargetGroup !== group.id &&
+              !!dragRef.current &&
+              dragRef.current.mode === 'table' &&
+              group.members.includes(dragRef.current.name);
             const nameW = Math.max(group.name.length * 6.6 + 52, 108);
             const midY = group.members.length ? box.y - GROUP_HEADER_H / 2 : box.y + GROUP_HEADER_H / 2;
             const chipY = group.members.length ? box.y - GROUP_HEADER_H : box.y;
@@ -577,15 +630,46 @@ export default function Diagram({
                   width={box.w}
                   height={box.h}
                   rx={16}
-                  fill={c.fill}
-                  fillOpacity={holdsDragged ? 0.14 : isSel ? 0.1 : 0.05}
-                  stroke={c.stroke}
-                  strokeOpacity={isSel ? 0.95 : 0.4}
-                  strokeWidth={isSel ? 2 : 1.4}
-                  strokeDasharray={empty ? '4 5' : isSel ? undefined : '9 7'}
-                  style={{ cursor: editMode ? 'move' : 'pointer' }}
+                  fill={isLosing ? '#f43f5e' : c.fill}
+                  fillOpacity={isDropTarget ? 0.22 : isLosing ? 0.1 : holdsDragged ? 0.14 : isSel ? 0.1 : 0.05}
+                  stroke={isLosing ? '#f43f5e' : c.stroke}
+                  strokeOpacity={isDropTarget || isSel ? 0.95 : isLosing ? 0.8 : 0.4}
+                  strokeWidth={isDropTarget ? 2.6 : isSel ? 2 : 1.4}
+                  strokeDasharray={isDropTarget ? undefined : isLosing ? '3 4' : empty ? '4 5' : isSel ? undefined : '9 7'}
+                  style={{
+                    cursor: editMode ? 'move' : 'pointer',
+                    transition: 'fill-opacity 120ms, stroke-opacity 120ms, stroke-width 120ms',
+                  }}
                   onPointerDown={startMove}
                 />
+                {isDropTarget && (
+                  <text
+                    x={box.x + box.w / 2}
+                    y={box.y + box.h + 18}
+                    textAnchor="middle"
+                    fontSize={11}
+                    fontWeight={700}
+                    fontFamily={MONO}
+                    fill={c.stroke}
+                    pointerEvents="none"
+                  >
+                    ↓ solte para entrar em “{group.name}”
+                  </text>
+                )}
+                {isLosing && (
+                  <text
+                    x={box.x + box.w / 2}
+                    y={box.y + box.h + 18}
+                    textAnchor="middle"
+                    fontSize={11}
+                    fontWeight={700}
+                    fontFamily={MONO}
+                    fill="#fda4af"
+                    pointerEvents="none"
+                  >
+                    ↑ saindo de “{group.name}”
+                  </text>
+                )}
                 {empty && (
                   <text
                     x={box.x + box.w / 2}
@@ -908,11 +992,28 @@ export default function Diagram({
                   e.preventDefault();
                   e.stopPropagation();
                   onSelect(table.name);
-                  onSelectGroup?.(null);
+                  // Mantém o grupo selecionado: permite "selecionar grupo → clicar tabela → adicionar".
                   const p = toDiagram(e.clientX, e.clientY);
                   dragRef.current = { mode: 'table', name: table.name, dx: p.x - r.x, dy: p.y - r.y, moved: false, pointerId: e.pointerId };
                   setDraggingTable(true);
                   svgRef.current?.setPointerCapture(e.pointerId);
+                  // Snapshot dos frames para o teste de saída não ser afetado pelo
+                  // fato de o frame "seguir" a tabela durante o arrasto.
+                  const snap = groupBoxes.map((b) => ({
+                    group: b.group.id,
+                    rect: { x: b.x, y: b.y, w: b.w, h: b.h },
+                  }));
+                  dragBoxSnapshot.current = snap;
+                  // grupo atual da tabela = drop target inicial (sem mudança)
+                  setDropTargetGroup(tableGroupOf.get(table.name)?.id ?? null);
+                  onTableDragStart?.({ table: table.name, boxes: snap });
+                }}
+                onContextMenu={(e) => {
+                  if (!editMode) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onSelect(table.name);
+                  setCtxMenu({ table: table.name, x: e.clientX, y: e.clientY });
                 }}
               >
                 <rect
@@ -950,18 +1051,16 @@ export default function Diagram({
                   const g = tableGroupOf.get(table.name);
                   if (!g) return null;
                   const c = groupColor(g.color);
+                  // faixa colorida na borda esquerda do header + pontinho
                   return (
-                    <circle
-                      cx={r.x + 6}
-                      cy={r.y + 6}
-                      r={3.5}
-                      fill={c.stroke}
-                      stroke="#0b1220"
-                      strokeWidth={1}
-                      pointerEvents="none"
-                    >
+                    <g pointerEvents="none">
+                      <path
+                        d={`M ${r.x} ${r.y + 10} Q ${r.x} ${r.y} ${r.x + 10} ${r.y} L ${r.x + 4} ${r.y} L ${r.x + 4} ${r.y + HEADER_H} L ${r.x} ${r.y + HEADER_H} Z`}
+                        fill={c.stroke}
+                        opacity={0.95}
+                      />
                       <title>{`Grupo: ${g.name}`}</title>
-                    </circle>
+                    </g>
                   );
                 })()}
 
@@ -1058,6 +1157,93 @@ export default function Diagram({
             : 'Solte sobre a coluna de destino. Esc cancela.'}
         </div>
       )}
+
+      {ctxMenu && (() => {
+        const currentGroup = tableGroupOf.get(ctxMenu.table) ?? null;
+        const others = groups.filter((g) => g.id !== currentGroup?.id);
+        const wrapRect = wrapRef.current?.getBoundingClientRect();
+        const left = wrapRect ? ctxMenu.x - wrapRect.left : ctxMenu.x;
+        const top = wrapRect ? ctxMenu.y - wrapRect.top : ctxMenu.y;
+        const close = () => setCtxMenu(null);
+        return (
+          <>
+            <div
+              className="absolute inset-0 z-30"
+              onPointerDown={close}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                close();
+              }}
+            />
+            <div
+              role="menu"
+              className="absolute z-40 min-w-[220px] overflow-hidden rounded-lg border border-slate-700 bg-slate-800 py-1 text-xs shadow-2xl"
+              style={{
+                left: Math.min(left, (wrapRect?.width ?? 9999) - 240),
+                top: Math.min(top, (wrapRect?.height ?? 9999) - 200),
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                {ctxMenu.table}
+              </div>
+              {currentGroup ? (
+                <button
+                  role="menuitem"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-rose-300 hover:bg-rose-500/15"
+                  onClick={() => {
+                    onRemoveFromGroup?.(ctxMenu.table, currentGroup.id);
+                    close();
+                  }}
+                >
+                  <span className="text-sm leading-none">⊖</span>
+                  Remover de “{currentGroup.name}”
+                </button>
+              ) : (
+                <div className="px-3 py-1.5 text-slate-500">Sem grupo</div>
+              )}
+              {others.length > 0 && (
+                <>
+                  <div className="my-1 border-t border-slate-700/70" />
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-slate-500">
+                    {currentGroup ? 'Mover para' : 'Adicionar a'}
+                  </div>
+                  {others.map((g) => {
+                    const gc = groupColor(g.color);
+                    return (
+                      <button
+                        key={g.id}
+                        role="menuitem"
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-slate-200 hover:bg-slate-700"
+                        onClick={() => {
+                          onAddToGroup?.(ctxMenu.table, g.id);
+                          close();
+                        }}
+                      >
+                        <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: gc.stroke }} />
+                        {g.name}
+                        <span className="ml-auto text-[10px] text-slate-500">{g.members.length}</span>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+              <div className="my-1 border-t border-slate-700/70" />
+              <button
+                role="menuitem"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-emerald-300 hover:bg-emerald-500/15"
+                onClick={() => {
+                  onCreateGroupWith?.(ctxMenu.table);
+                  close();
+                }}
+              >
+                <span className="text-sm leading-none">＋</span>
+                Novo grupo com esta tabela
+              </button>
+            </div>
+          </>
+        );
+      })()}
 
       {editMode && !linkDrag && (
         <div
