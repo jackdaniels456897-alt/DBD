@@ -99,13 +99,12 @@ created_at datetime`}</pre>
                 <strong className="text-slate-100">Criar:</strong> segure{' '}
                 <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">Ctrl</kbd>/
                 <kbd className="rounded border border-slate-600 bg-slate-800 px-1 text-[10px]">⌘</kbd> e arraste sobre as
-                tabelas que quer agrupar. As tabelas dentro do retângulo entram no grupo.
+                tabelas que quer agrupar.
               </li>
               <li>
-                <strong className="text-slate-100">Entrar/sair (3 jeitos):</strong> arraste a tabela para dentro/fora
-                da área (o alvo acende em tempo real); ou clique com o{' '}
-                <strong className="text-slate-100">botão direito</strong> na tabela em modo edição; ou use o painel
-                “▦ Grupos” (clique no chip da tabela para removê-la).
+                <strong className="text-slate-100">Entrar/sair (só em modo edição):</strong> com o Ctrl/⌘ pressionado,
+                arraste a tabela para dentro/fora da área; ou clique com o botão direito na tabela.
+                (Sem Ctrl/⌘ a tabela apenas se move visualmente, mas não sai do grupo).
               </li>
               <li>
                 Com um grupo e uma tabela selecionados, a tecla{' '}
@@ -113,8 +112,8 @@ created_at datetime`}</pre>
                 no grupo.
               </li>
               <li>A faixa colorida no canto do cabeçalho da tabela indica o grupo dela.</li>
-              <li>Arraste o título ou o interior da área para mover o grupo inteiro com as tabelas.</li>
-              <li>Duplo-clique no título renomeia. O ✕ (no modo edição) apaga só a área — as tabelas ficam.</li>
+              <li>Arraste o título ou o interior da área (mesmo sem Ctrl/⌘) para mover o grupo inteiro com as tabelas.</li>
+              <li>Duplo-clique no título renomeia a qualquer momento. O ✕ (no modo edição) apaga só a área.</li>
               <li><strong className="text-slate-100">Auto layout</strong> reorganiza mantendo cada grupo agrupado.</li>
               <li>Exportações SQL e Markdown vêm organizadas por grupo (com cabeçalhos).</li>
               <li>Grupos entram no “Salvar Projeto” e são restaurados ao importar.</li>

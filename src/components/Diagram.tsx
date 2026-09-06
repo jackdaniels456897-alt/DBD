@@ -406,7 +406,7 @@ export default function Diagram({
       const wasMoved = drag.moved;
       const name = drag.name;
       cancelDrag();
-      if (wasMoved) onTableDropped?.(name); // reavalia participação em grupos
+      if (wasMoved && editMode) onTableDropped?.(name);
       return;
     }
 
@@ -595,10 +595,11 @@ export default function Diagram({
             const isRenaming = renamingGroup === group.id;
             const holdsDragged = !!linkDrag && group.members.includes(linkDrag.srcTable);
             const empty = box.memberNames.length === 0;
-            /** Tabela sendo arrastada vai cair AQUI ao soltar. */
-            const isDropTarget = draggingTable && dropTargetGroup === group.id;
-            /** Tabela sendo arrastada está SAINDO deste grupo. */
+            /** Tabela sendo arrastada vai cair AQUI ao soltar (só em modo edição). */
+            const isDropTarget = editMode && draggingTable && dropTargetGroup === group.id;
+            /** Tabela sendo arrastada está SAINDO deste grupo (só em modo edição). */
             const isLosing =
+              editMode &&
               draggingTable &&
               dropTargetGroup !== group.id &&
               !!dragRef.current &&
@@ -613,7 +614,6 @@ export default function Diagram({
               e.stopPropagation();
               onSelectGroup?.(group.id);
               onSelect(null);
-              if (!editMode) return; // fora do modo edição, só seleciona
               e.preventDefault();
               const pt = toDiagram(e.clientX, e.clientY);
               dragRef.current = { mode: 'groupMove', id: group.id, start: pt, pointerId: e.pointerId };
@@ -637,7 +637,7 @@ export default function Diagram({
                   strokeWidth={isDropTarget ? 2.6 : isSel ? 2 : 1.4}
                   strokeDasharray={isDropTarget ? undefined : isLosing ? '3 4' : empty ? '4 5' : isSel ? undefined : '9 7'}
                   style={{
-                    cursor: editMode ? 'move' : 'pointer',
+                    cursor: dragRef.current?.mode === 'groupMove' && dragRef.current.id === group.id ? 'grabbing' : 'grab',
                     transition: 'fill-opacity 120ms, stroke-opacity 120ms, stroke-width 120ms',
                   }}
                   onPointerDown={startMove}
@@ -687,10 +687,9 @@ export default function Diagram({
 
                 {/* title chip */}
                 <g
-                  style={{ cursor: editMode ? 'move' : 'pointer' }}
+                  style={{ cursor: dragRef.current?.mode === 'groupMove' && dragRef.current.id === group.id ? 'grabbing' : 'grab' }}
                   onPointerDown={startMove}
                   onDoubleClick={(e) => {
-                    if (!editMode) return;
                     e.stopPropagation();
                     setRenamingGroup(group.id);
                   }}
