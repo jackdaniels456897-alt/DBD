@@ -87,7 +87,8 @@ created_at datetime`}</pre>
               <li>Arraste uma âncora até uma coluna de outra tabela para criar a conexão.</li>
               <li>Comece pela PK/UNIQUE ou pela FK: o editor identifica qual coluna recebe a referência.</li>
               <li>Clique no X vermelho perto do meio da linha para remover a conexão.</li>
-              <li>Duplo-clique no fundo abre o diálogo para criar uma nova tabela na posição.</li>
+              <li>Duplo-clique no fundo cria a tabela direto na posição, já com o nome em edição.</li>
+              <li>Clique no título da tabela (em modo edição) para renomear, igual aos grupos.</li>
               <li>Solte a tecla para voltar ao modo normal (arrastar/reposicionar).</li>
             </ul>
           </section>
@@ -123,7 +124,7 @@ created_at datetime`}</pre>
           <section>
             <h3 className="mb-2 text-sm font-semibold text-sky-400">6. Dicas gerais</h3>
             <ul className="space-y-1.5 text-xs text-slate-300">
-              <li>Botão “+ Nova tabela” cria uma tabela no centro do canvas.</li>
+              <li>Botão “+ Nova tabela” cria direto no centro do canvas, já com o nome em edição — sem janela.</li>
               <li>Arraste as tabelas para reposicioná-las. Alt desativa o encaixe na grade.</li>
               <li>Roda do mouse: zoom. Arrastar o fundo: mover o canvas.</li>
               <li>Clique em um problema para selecionar a linha correspondente no editor.</li>

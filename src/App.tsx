@@ -11,6 +11,7 @@ import {
   createVisualConnection,
   createVisualTable,
   removeVisualConnection,
+  renameVisualTable,
 } from './lib/visualRelations';
 import {
   autoLayoutWithGroups,
@@ -81,9 +82,10 @@ export default function App() {
   const diagramRef = useRef<DiagramHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const namePromptInput = useRef<HTMLInputElement | null>(null);
 
   const [editMode, setEditMode] = useState(false);
+  /** Tabela com edição inline de nome aberta no diagrama (mesmo padrão dos grupos). */
+  const [renamingTable, setRenamingTable] = useState<string | null>(null);
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
   const [groupAnchors, setGroupAnchors] = useState<Record<string, Point>>(() => {
     try {
@@ -94,11 +96,6 @@ export default function App() {
     }
   });
   const [showGroupsPanel, setShowGroupsPanel] = useState(false);
-  const [tablePrompt, setTablePrompt] = useState<{
-    screen: Point;
-    position?: Point;
-    value: string;
-  } | null>(null);
 
   const parsed = useMemo(() => parseSchema(text), [text]);
   const { tables, relationships, diagnostics, lineKinds } = parsed;
@@ -137,43 +134,67 @@ export default function App() {
     };
   }, []);
 
-  /* ---------- visual creation of tables ---------- */
-  const handleCreateTable = useCallback(
-    (name: string, position?: Point) => {
-      const result = createVisualTable(text, name);
-      if (result.status === 'created') {
-        if (position) {
-          setPositions((prev) => ({ ...prev, [result.tableName]: position }));
-        }
-        setText(result.text);
-        setSelected(result.tableName);
+  /* ---------- visual creation of tables (direta, sem janela) ---------- */
+  const handleCreateTableDirect = useCallback(
+    (position?: Point) => {
+      const result = createVisualTable(text, 'nova_tabela');
+      if (result.status !== 'created') {
+        flash(result.message);
+        return;
       }
-      flash(result.message);
-      return result.status === 'created';
+      if (position) {
+        setPositions((prev) => ({ ...prev, [result.tableName]: position }));
+      }
+      setText(result.text);
+      setSelected(result.tableName);
+      // abre a edição inline do nome no cabeçalho, igual aos grupos
+      setRenamingTable(result.tableName);
+      flash(`Tabela "${result.tableName}" criada — digite o nome e pressione Enter.`);
     },
     [text, flash],
   );
 
-  const openTablePrompt = useCallback((screen: Point, position?: Point) => {
-    setTablePrompt({ screen, position, value: '' });
-  }, []);
-
-  const openHeaderTablePrompt = useCallback(() => {
+  const handleCreateTableAtCenter = useCallback(() => {
     const center = diagramRef.current?.getViewportCenter();
-    if (center) openTablePrompt(center.screen, center.diagram);
-    else openTablePrompt({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
-  }, [openTablePrompt]);
+    handleCreateTableDirect(center ? center.diagram : undefined);
+  }, [handleCreateTableDirect]);
 
-  const confirmTablePrompt = useCallback(() => {
-    if (!tablePrompt) return;
-    const ok = handleCreateTable(tablePrompt.value, tablePrompt.position);
-    if (ok) setTablePrompt(null);
-    else namePromptInput.current?.focus();
-  }, [handleCreateTable, tablePrompt]);
+  /** Renomeia via edição inline. Retorna true se concluiu (fecha o input). */
+  const handleRenameTable = useCallback(
+    (oldName: string, newName: string) => {
+      const result = renameVisualTable(text, oldName, newName);
+      if (result.status === 'error') {
+        flash(result.message);
+        return false;
+      }
+      if (result.status === 'unchanged') {
+        setRenamingTable(null);
+        return true;
+      }
+      setText(result.text);
+      setPositions((prev) => {
+        if (!(oldName in prev)) return prev;
+        const { [oldName]: pos, ...rest } = prev;
+        return { ...rest, [result.tableName]: pos };
+      });
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.members.some((m) => m.toLowerCase() === oldName.toLowerCase())
+            ? { ...g, members: g.members.map((m) => (m.toLowerCase() === oldName.toLowerCase() ? result.tableName : m)) }
+            : g,
+        ),
+      );
+      setSelected((cur) => (cur && cur.toLowerCase() === oldName.toLowerCase() ? result.tableName : cur));
+      setRenamingTable(null);
+      flash(result.message);
+      return true;
+    },
+    [text, flash],
+  );
 
-  useEffect(() => {
-    if (tablePrompt) namePromptInput.current?.focus();
-  }, [tablePrompt]);
+  const handleCancelRenameTable = useCallback(() => {
+    setRenamingTable(null);
+  }, []);
 
   /* ---------- visual editing: create / remove connectors ---------- */
   const handleLink = useCallback(
@@ -704,9 +725,9 @@ export default function App() {
           Limpar
         </button>
         <button
-          onClick={openHeaderTablePrompt}
+          onClick={handleCreateTableAtCenter}
           className="rounded-md border border-emerald-500/60 bg-emerald-500/15 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/25"
-          title="Adiciona uma nova tabela ao schema"
+          title="Cria a tabela direto no centro do canvas, já editando o nome"
         >
           + Nova tabela
         </button>
@@ -1047,7 +1068,11 @@ export default function App() {
             onMove={handleMove}
             onLink={handleLink}
             onRemove={handleRemove}
-            onCreateTableAt={(screen, position) => openTablePrompt(screen, position)}
+            onCreateTable={(position) => handleCreateTableDirect(position)}
+            renamingTable={renamingTable}
+            onStartRenameTable={setRenamingTable}
+            onCommitRenameTable={handleRenameTable}
+            onCancelRenameTable={handleCancelRenameTable}
             connector={opts.connector}
             colorful={opts.colorful}
             showLabels={opts.showLabels}
@@ -1100,65 +1125,6 @@ export default function App() {
         <div role="status" className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-slate-700 bg-slate-800 px-4 py-2 text-xs text-slate-100 shadow-xl">
           {toast}
         </div>
-      )}
-
-      {tablePrompt && (
-        <>
-          <div className="fixed inset-0 z-40" onPointerDown={() => setTablePrompt(null)} />
-          <div
-            className="fixed z-50 w-64 -translate-x-1/2 -translate-y-1/2 rounded-lg border border-emerald-500/60 bg-slate-900 p-3 shadow-2xl"
-            style={{
-              left: Math.min(Math.max(tablePrompt.screen.x, 140), window.innerWidth - 140),
-              top: Math.min(Math.max(tablePrompt.screen.y, 60), window.innerHeight - 100),
-            }}
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                confirmTablePrompt();
-              }}
-            >
-              <label className="mb-1 block text-[11px] font-medium text-emerald-300">
-                Nome da nova tabela
-              </label>
-              <input
-                ref={namePromptInput}
-                value={tablePrompt.value}
-                onChange={(e) => setTablePrompt((p) => (p ? { ...p, value: e.target.value } : p))}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape') {
-                    e.preventDefault();
-                    setTablePrompt(null);
-                  }
-                }}
-                placeholder="Ex.: Customers"
-                className="w-full rounded border border-slate-700 bg-slate-800 px-2 py-1.5 text-sm text-white outline-none focus:border-emerald-500"
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <p className="mt-1.5 text-[10px] leading-snug text-slate-500">
-                Letras, números e underscore. A tabela nasce com{' '}
-                <code className="text-emerald-300">id</code> como PK.
-              </p>
-              <div className="mt-3 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setTablePrompt(null)}
-                  className="rounded border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-700"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  className="rounded bg-emerald-500 px-2.5 py-1 text-xs font-semibold text-slate-900 hover:bg-emerald-400"
-                >
-                  Criar
-                </button>
-              </div>
-            </form>
-          </div>
-        </>
       )}
 
       <ExportModal

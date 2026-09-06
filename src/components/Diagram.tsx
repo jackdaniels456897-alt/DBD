@@ -56,7 +56,14 @@ interface Props {
   onMove: (name: string, p: Point) => void;
   onLink: (from: string, fromCol: string, to: string, toCol: string) => void;
   onRemove: (id: string) => void;
-  onCreateTableAt?: (screen: Point, diagram: Point) => void;
+  /** Cria a tabela direto na posição (sem janela); o App abre a edição inline. */
+  onCreateTable?: (position: Point) => void;
+  /** Nome da tabela com edição inline aberta (controlado pelo App). */
+  renamingTable?: string | null;
+  onStartRenameTable?: (name: string) => void;
+  /** Retorna true se concluiu (fecha o input), false se mantém aberto (erro). */
+  onCommitRenameTable?: (oldName: string, newName: string) => boolean;
+  onCancelRenameTable?: () => void;
   connector: ConnectorStyle;
   colorful: boolean;
   showLabels: boolean;
@@ -100,7 +107,7 @@ type LinkDrag = {
 
 type DragState = { pointerId: number } & (
   | { mode: 'pan'; startX: number; startY: number; ox: number; oy: number }
-  | { mode: 'table'; name: string; dx: number; dy: number; moved: boolean }
+  | { mode: 'table'; name: string; dx: number; dy: number; moved: boolean; fromHeader: boolean }
   | { mode: 'link'; drag: LinkDrag }
   | { mode: 'groupMove'; id: string; start: Point; moved: boolean; fromChip: boolean }
   | { mode: 'groupDraw'; start: Point }
@@ -150,7 +157,11 @@ export default function Diagram({
   onMove,
   onLink,
   onRemove,
-  onCreateTableAt,
+  onCreateTable,
+  renamingTable = null,
+  onStartRenameTable,
+  onCommitRenameTable,
+  onCancelRenameTable,
   connector,
   colorful,
   showLabels,
@@ -409,10 +420,14 @@ export default function Diagram({
       return;
     }
     if (drag.mode === 'table') {
-      const wasMoved = drag.moved;
-      const name = drag.name;
+      const { moved: wasMoved, fromHeader, name } = drag;
       cancelDrag();
-      if (wasMoved && editMode) onTableDropped?.(name);
+      if (wasMoved) {
+        if (editMode) onTableDropped?.(name);
+      } else if (fromHeader && editMode) {
+        // clique simples no cabeçalho, em modo edição => renomear (igual aos grupos)
+        onStartRenameTable?.(name);
+      }
       return;
     }
 
@@ -583,11 +598,10 @@ export default function Diagram({
             svgRef.current?.setPointerCapture(e.pointerId);
           }}
           onDoubleClick={(e) => {
-            if (!editMode || !onCreateTableAt) return;
+            if (!editMode || !onCreateTable) return;
             e.preventDefault();
             e.stopPropagation();
-            const point = toDiagram(e.clientX, e.clientY);
-            onCreateTableAt({ x: e.clientX, y: e.clientY }, point);
+            onCreateTable(toDiagram(e.clientX, e.clientY));
           }}
         />
         <rect width="100%" height="100%" fill="url(#dbd-grid)" pointerEvents="none" />
@@ -1013,7 +1027,7 @@ export default function Diagram({
                   onSelect(table.name);
                   // Mantém o grupo selecionado: permite "selecionar grupo → clicar tabela → adicionar".
                   const p = toDiagram(e.clientX, e.clientY);
-                  dragRef.current = { mode: 'table', name: table.name, dx: p.x - r.x, dy: p.y - r.y, moved: false, pointerId: e.pointerId };
+                  dragRef.current = { mode: 'table', name: table.name, dx: p.x - r.x, dy: p.y - r.y, moved: false, fromHeader: p.y - r.y <= HEADER_H, pointerId: e.pointerId };
                   setDraggingTable(true);
                   svgRef.current?.setPointerCapture(e.pointerId);
                   // Snapshot dos frames para o teste de saída não ser afetado pelo
@@ -1046,16 +1060,78 @@ export default function Diagram({
                   strokeWidth={isLinkTarget || isSelected || hasError ? 2 : 1.2}
                 />
                 <path d={headerPath} fill={hasError ? '#4c1d24' : '#1e293b'} />
-                <text
-                  x={r.x + 12}
-                  y={r.y + 22}
-                  fontSize={13}
-                  fontWeight={700}
-                  fontFamily={MONO}
-                  fill={hasError ? '#fda4af' : '#e2e8f0'}
-                >
-                  {table.name}
-                </text>
+                {renamingTable === table.name ? (
+                  <foreignObject
+                    x={r.x + 4}
+                    y={r.y + 4}
+                    width={r.w - 8}
+                    height={HEADER_H - 8}
+                    data-interactive="true"
+                  >
+                    <input
+                      autoFocus
+                      defaultValue={table.name}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      onBlur={(e) => {
+                        const v = e.currentTarget.value.trim();
+                        if (!v || v === table.name) {
+                          onCancelRenameTable?.();
+                          return;
+                        }
+                        const ok = onCommitRenameTable?.(table.name, v);
+                        // se falhou (nome inválido/duplicado), mantém aberto
+                        if (ok === false) e.currentTarget.focus();
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          const v = e.currentTarget.value.trim();
+                          if (!v || v === table.name) {
+                            onCancelRenameTable?.();
+                            return;
+                          }
+                          const ok = onCommitRenameTable?.(table.name, v);
+                          if (ok === false) e.currentTarget.focus();
+                        }
+                        if (e.key === 'Escape') onCancelRenameTable?.();
+                        e.stopPropagation();
+                      }}
+                      onFocus={(e) => e.currentTarget.select()}
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        boxSizing: 'border-box',
+                        background: '#0f172a',
+                        color: '#f8fafc',
+                        border: '1.5px solid #38bdf8',
+                        borderRadius: 7,
+                        padding: '0 8px',
+                        font: `700 13px ${MONO}`,
+                        outline: 'none',
+                      }}
+                    />
+                  </foreignObject>
+                ) : (
+                  <text
+                    x={r.x + 12}
+                    y={r.y + 22}
+                    fontSize={13}
+                    fontWeight={700}
+                    fontFamily={MONO}
+                    fill={hasError ? '#fda4af' : '#e2e8f0'}
+                    style={editMode ? { cursor: 'text' } : undefined}
+                    onDoubleClick={(e) => {
+                      if (!editMode) return;
+                      e.stopPropagation();
+                      onStartRenameTable?.(table.name);
+                    }}
+                  >
+                    {table.name}
+                    {editMode ? (
+                      <title>Clique para renomear</title>
+                    ) : null}
+                  </text>
+                )}
                 <text
                   x={r.x + r.w - 10}
                   y={r.y + 22}
@@ -1206,6 +1282,17 @@ export default function Diagram({
               <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
                 {ctxMenu.table}
               </div>
+              <button
+                role="menuitem"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sky-300 hover:bg-sky-500/15"
+                onClick={() => {
+                  onStartRenameTable?.(ctxMenu.table);
+                  close();
+                }}
+              >
+                <span className="text-sm leading-none">✏️</span>
+                Renomear tabela
+              </button>
               {currentGroup ? (
                 <button
                   role="menuitem"
@@ -1270,7 +1357,7 @@ export default function Diagram({
           role="status"
         >
           <span className="inline-block h-2 w-2 rounded-full bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.9)]" />
-          Modo edição — âncoras conectam • arraste o fundo desenha grupo • 2× clique cria tabela
+          Modo edição — âncoras conectam • arraste o fundo desenha grupo • 2× clique cria tabela • clique no título renomeia
         </div>
       )}
 

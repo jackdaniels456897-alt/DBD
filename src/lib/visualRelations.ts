@@ -231,6 +231,152 @@ export function createVisualTable(text: string, rawName: string): TableCreation 
   };
 }
 
+export interface TableRename {
+  text: string;
+  status: 'renamed' | 'unchanged' | 'error';
+  message: string;
+  tableName: string;
+}
+
+function quoteIdentifier(name: string) {
+  return identifier(name);
+}
+
+/** Extrai símbolo e coluna da referência atual que aponta para oldTable. */
+function extractRefTarget(
+  body: string,
+  bracketAttrs: string[],
+  oldTable: string,
+): { symbol: string; column: string } | null {
+  for (const attr of bracketAttrs) {
+    const rm = attr.trim().match(/^ref\s*[:=]\s*(.+)$/i);
+    if (!rm) continue;
+    const m = rm[1].trim().match(/^([<>0-]{1,3})?\s*(.+)$/);
+    if (!m) continue;
+    const dot = m[2].lastIndexOf('.');
+    if (dot < 0) continue;
+    const tablePart = m[2].slice(0, dot).trim().replace(/^["'`]|["'`]$/g, '');
+    if (tablePart.toLowerCase() !== oldTable.toLowerCase()) continue;
+    return { symbol: (m[1] ?? '').trim(), column: m[2].slice(dot + 1).trim() };
+  }
+  const tokens = [...body.matchAll(/(?:[^\s"'`]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[^`]*`)+/g)].map(
+    (t) => t[0],
+  );
+  for (let i = 1; i < tokens.length; i++) {
+    const prev = tokens[i - 1];
+    const cur = tokens[i];
+    if (!REL_SYMBOL.test(prev) && !/^fk$/i.test(prev)) continue;
+    const dot = cur.lastIndexOf('.');
+    if (dot <= 0 || dot === cur.length - 1) continue;
+    if (/[:=]/.test(cur.slice(0, dot))) continue;
+    const tablePart = cur.slice(0, dot).replace(/^["'`]|["'`]$/g, '');
+    if (tablePart.toLowerCase() !== oldTable.toLowerCase()) continue;
+    return { symbol: REL_SYMBOL.test(prev) ? prev : '', column: cur.slice(dot + 1) };
+  }
+  return null;
+}
+
+/** Substitui a tabela-alvo de uma referência, preservando símbolo e coluna. */
+function replaceRefTarget(line: string, oldTable: string, newTable: string): string {
+  const ending = line.endsWith('\r') ? '\r' : '';
+  const src = ending ? line.slice(0, -1) : line;
+  const { code, comment } = splitSchemaComment(src);
+  const bracket = code.match(/^(.*?)\s*\[(.*)\](.*)$/);
+  const attrs = bracket ? splitAttributes(bracket[2]) : [];
+
+  let body = bracket ? bracket[1].trimEnd() : code;
+  const trailing = bracket?.[3] ?? '';
+  if (trailing.trim()) body += ` ${trailing.trim()}`;
+
+  const current = extractRefTarget(body, attrs, oldTable);
+  if (!current) return line;
+  const target = `${quoteIdentifier(newTable)}.${current.column}`;
+  // Nomes com espaço não funcionam inline (o parser quebra por whitespace):
+  // usa sempre a forma [ref: ...], igual ao createVisualConnection.
+  const useBrackets = !!bracket || /\s/.test(newTable);
+
+  const kept = attrs
+    .map((attr) => attr.trim())
+    .filter((attr) => attr && !/^ref\s*[:=]/i.test(attr) && !/^fk$/i.test(attr));
+
+  let newBody = removeInlineReference(body);
+  if (useBrackets) {
+    kept.push(`ref: ${current.symbol ? current.symbol + ' ' : ''}${target}`);
+    return `${newBody}${kept.length ? ` [${kept.join(', ')}]` : ''}${comment}${ending}`;
+  }
+  newBody += ` FK${current.symbol ? ` ${current.symbol}` : ''} ${target}`;
+  return `${newBody}${kept.length ? ` [${kept.join(', ')}]` : ''}${comment}${ending}`;
+}
+
+export function renameVisualTable(text: string, oldName: string, rawNew: string): TableRename {
+  const trimmed = rawNew.trim().replace(/^["'`]|["'`]$/g, '');
+  if (!trimmed) {
+    return { text, status: 'error', message: 'O nome não pode ficar vazio.', tableName: oldName };
+  }
+  if (!/^[A-Za-z_][\w$ ]*$/.test(trimmed)) {
+    return {
+      text,
+      status: 'error',
+      message: 'Use apenas letras, números, underscore e espaços. Comece por letra.',
+      tableName: oldName,
+    };
+  }
+  const schema = parseSchema(text);
+  const target = schema.tables.find((t) => t.name.toLowerCase() === oldName.toLowerCase());
+  if (!target) {
+    return { text, status: 'error', message: 'Tabela original não encontrada.', tableName: oldName };
+  }
+  if (trimmed.toLowerCase() !== target.name.toLowerCase()) {
+    const clash = schema.tables.some(
+      (t) => t !== target && t.name.toLowerCase() === trimmed.toLowerCase(),
+    );
+    if (clash) {
+      return { text, status: 'error', message: `Já existe uma tabela chamada "${trimmed}".`, tableName: oldName };
+    }
+  } else if (trimmed === target.name) {
+    return { text, status: 'unchanged', message: 'Nome mantido.', tableName: target.name };
+  }
+
+  const newName = trimmed;
+  const lines = text.split('\n');
+
+  // 1) cabeçalho
+  const headerIdx = target.line - 1;
+  const headerRaw = lines[headerIdx] ?? '';
+  const { code: headerCode, comment: headerComment } = splitSchemaComment(
+    headerRaw.endsWith('\r') ? headerRaw.slice(0, -1) : headerRaw,
+  );
+  const headerEnding = headerRaw.endsWith('\r') ? '\r' : '';
+  const brace = headerCode.match(/^(\s*)(["'`]?)(.*?)\2\s*\{\s*$/);
+  if (brace) {
+    const q = /\s/.test(newName) ? '"' : brace[2];
+    lines[headerIdx] = `${brace[1]}${q}${newName}${q} {${headerComment}${headerEnding}`;
+  } else {
+    const dash = headerCode.match(/^(\s*)(["'`]?)(.*?)\2\s*$/);
+    if (!dash) {
+      return { text, status: 'error', message: 'Não foi possível localizar o cabeçalho da tabela.', tableName: oldName };
+    }
+    const q = /\s/.test(newName) ? '"' : dash[2];
+    lines[headerIdx] = `${dash[1]}${q}${newName}${q}${headerComment}${headerEnding}`;
+  }
+
+  // 2) referências (qualquer coluna cujo ref aponte para a tabela antiga)
+  for (const table of schema.tables) {
+    for (const col of table.columns) {
+      if (col.ref && col.ref.table.toLowerCase() === target.name.toLowerCase()) {
+        lines[col.line - 1] = replaceRefTarget(lines[col.line - 1], target.name, newName);
+      }
+    }
+  }
+
+  const next = lines.join('\n');
+  const check = parseSchema(next);
+  if (!check.tables.some((t) => t.name === newName)) {
+    return { text, status: 'error', message: 'Não foi possível renomear. Verifique a sintaxe.', tableName: oldName };
+  }
+  return { text: next, status: 'renamed', message: `Tabela renomeada para "${newName}".`, tableName: newName };
+}
+
 export function removeVisualConnection(text: string, id: string): ConnectionEdit {
   const schema = parseSchema(text);
   const relation = schema.relationships.find((rel) => rel.id === id);
