@@ -102,7 +102,7 @@ type DragState = { pointerId: number } & (
   | { mode: 'pan'; startX: number; startY: number; ox: number; oy: number }
   | { mode: 'table'; name: string; dx: number; dy: number; moved: boolean }
   | { mode: 'link'; drag: LinkDrag }
-  | { mode: 'groupMove'; id: string; start: Point }
+  | { mode: 'groupMove'; id: string; start: Point; moved: boolean; fromChip: boolean }
   | { mode: 'groupDraw'; start: Point }
 );
 
@@ -349,6 +349,9 @@ export default function Diagram({
     }
     if (drag.mode === 'groupMove') {
       const snap = e.altKey ? 1 : 5;
+      if (Math.hypot(p.x - drag.start.x, p.y - drag.start.y) * viewRef.current.k > 3) {
+        drag.moved = true;
+      }
       onGroupMove?.(drag.id, {
         x: Math.round((p.x - drag.start.x) / snap) * snap,
         y: Math.round((p.y - drag.start.y) / snap) * snap,
@@ -398,8 +401,11 @@ export default function Diagram({
       return;
     }
     if (drag.mode === 'groupMove') {
+      const { moved, fromChip, id } = drag;
       cancelDrag();
       onGroupMoveEnd?.();
+      // clique simples no título, em modo edição => renomear
+      if (!moved && fromChip && editMode) setRenamingGroup(id);
       return;
     }
     if (drag.mode === 'table') {
@@ -609,14 +615,21 @@ export default function Diagram({
             const midY = group.members.length ? box.y - GROUP_HEADER_H / 2 : box.y + GROUP_HEADER_H / 2;
             const chipY = group.members.length ? box.y - GROUP_HEADER_H : box.y;
 
-            const startMove = (e: React.PointerEvent) => {
+            const startMove = (fromChip: boolean) => (e: React.PointerEvent) => {
               if (e.button !== 0 || dragRef.current || linkDrag) return;
               e.stopPropagation();
               onSelectGroup?.(group.id);
               onSelect(null);
               e.preventDefault();
               const pt = toDiagram(e.clientX, e.clientY);
-              dragRef.current = { mode: 'groupMove', id: group.id, start: pt, pointerId: e.pointerId };
+              dragRef.current = {
+                mode: 'groupMove',
+                id: group.id,
+                start: pt,
+                moved: false,
+                fromChip,
+                pointerId: e.pointerId,
+              };
               onGroupMoveStart?.(group.id);
               svgRef.current?.setPointerCapture(e.pointerId);
             };
@@ -640,7 +653,7 @@ export default function Diagram({
                     cursor: dragRef.current?.mode === 'groupMove' && dragRef.current.id === group.id ? 'grabbing' : 'grab',
                     transition: 'fill-opacity 120ms, stroke-opacity 120ms, stroke-width 120ms',
                   }}
-                  onPointerDown={startMove}
+                  onPointerDown={startMove(false)}
                 />
                 {isDropTarget && (
                   <text
@@ -687,8 +700,15 @@ export default function Diagram({
 
                 {/* title chip */}
                 <g
-                  style={{ cursor: dragRef.current?.mode === 'groupMove' && dragRef.current.id === group.id ? 'grabbing' : 'grab' }}
-                  onPointerDown={startMove}
+                  style={{
+                    cursor:
+                      dragRef.current?.mode === 'groupMove' && dragRef.current.id === group.id
+                        ? 'grabbing'
+                        : editMode
+                          ? 'text'
+                          : 'grab',
+                  }}
+                  onPointerDown={startMove(true)}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
                     setRenamingGroup(group.id);

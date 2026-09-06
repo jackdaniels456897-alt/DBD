@@ -28,7 +28,8 @@ const MODIFIER_LABEL = IS_MAC ? '⌘' : 'Ctrl';
 
 const LS_TEXT = 'qdbd.text';
 const LS_POS = 'qdbd.positions';
-const LS_OPTS = 'qdbd.opts';
+// v2: novo padrão de largura do editor (25%). Bump reaplica os defaults uma vez.
+const LS_OPTS = 'qdbd.opts.v2';
 const LS_GROUPS = 'qdbd.groups';
 const LS_GROUP_ANCHORS = 'qdbd.groupAnchors';
 
@@ -43,7 +44,7 @@ const DEFAULT_OPTS: Options = {
   connector: 'orthogonal',
   colorful: true,
   showLabels: false,
-  editorWidth: 42,
+  editorWidth: 25,
 };
 
 function loadJSON<T>(key: string, fallback: T): T {
@@ -356,13 +357,41 @@ export default function App() {
   };
 
   /* ---------- table groups ---------- */
-  const groupOrigins = useRef<Record<string, Point> | null>(null);
+  const groupOrigins = useRef<{ members: Record<string, Point>; anchor: Point } | null>(null);
   const groupBoxSnapshot = useRef<Array<{ group: string; rect: Rect }> | null>(null);
 
   const groupBoxes = useMemo(
     () => groups.map((g) => groupBox(g, tables, positions, groupAnchors)),
     [groups, tables, positions, groupAnchors],
   );
+
+  /**
+   * Última origem conhecida de cada frame COM membros. Serve de âncora quando o
+   * grupo fica vazio, para ele não "pular" para o canto.
+   */
+  const lastBoxOrigin = useRef<Record<string, Point>>({});
+  useEffect(() => {
+    for (const b of groupBoxes) {
+      if (b.memberNames.length) lastBoxOrigin.current[b.group.id] = { x: b.x, y: b.y };
+    }
+  }, [groupBoxes]);
+
+  /** Ao ficar vazio, congela a posição atual como âncora persistida. */
+  const wasEmpty = useRef<Record<string, boolean>>({});
+  useEffect(() => {
+    const pending: Record<string, Point> = {};
+    for (const g of groups) {
+      const empty = g.members.length === 0;
+      // Na transição para vazio a origem real do frame é sempre mais confiável
+      // que a âncora antiga (que pode ter ficado obsoleta ao mover tabelas).
+      if (empty && !wasEmpty.current[g.id]) {
+        const last = lastBoxOrigin.current[g.id];
+        if (last) pending[g.id] = last;
+      }
+      wasEmpty.current[g.id] = empty;
+    }
+    if (Object.keys(pending).length) setGroupAnchors((a) => ({ ...a, ...pending }));
+  }, [groups]);
 
   const createGroupFromRect = useCallback(
     (rect: { x: number; y: number; w: number; h: number }) => {
@@ -503,13 +532,14 @@ export default function App() {
     (id: string) => {
       const g = groups.find((x) => x.id === id);
       if (!g) return;
-      const snap: Record<string, Point> = {};
-      for (const name of g.members) if (positions[name]) snap[name] = { ...positions[name] };
-      // guarda também a âncora, para grupos vazios
-      const anchorSnap = groupAnchors[id];
-      groupOrigins.current = { ...snap, ...(anchorSnap ? { __anchor__: anchorSnap } : {}) };
+      const members: Record<string, Point> = {};
+      for (const name of g.members) if (positions[name]) members[name] = { ...positions[name] };
+      // Âncora sempre disponível: usa a persistida, senão a origem atual do frame.
+      const box = groupBoxes.find((b) => b.group.id === id);
+      const anchor = groupAnchors[id] ?? (box ? { x: box.x, y: box.y } : { x: 60, y: 60 });
+      groupOrigins.current = { members, anchor };
     },
-    [groups, positions, groupAnchors],
+    [groups, positions, groupAnchors, groupBoxes],
   );
 
   const moveGroup = useCallback(
@@ -522,17 +552,18 @@ export default function App() {
         setPositions((prev) => {
           const next = { ...prev };
           for (const name of g.members) {
-            const o = origins[name];
+            const o = origins.members[name];
             if (o) next[name] = { x: o.x + delta.x, y: o.y + delta.y };
           }
           return next;
         });
-      } else if (origins.__anchor__) {
-        setGroupAnchors((a) => ({
-          ...a,
-          [id]: { x: origins.__anchor__.x + delta.x, y: origins.__anchor__.y + delta.y },
-        }));
       }
+      // A âncora acompanha sempre — assim um grupo que ficar vazio depois
+      // mantém a posição correta.
+      setGroupAnchors((a) => ({
+        ...a,
+        [id]: { x: origins.anchor.x + delta.x, y: origins.anchor.y + delta.y },
+      }));
     },
     [groups],
   );
